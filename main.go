@@ -88,6 +88,8 @@ func main() {
 		log.Fatal(http.ListenAndServe(*serve, rootHandler()))
 	}
 
+	applyWindowIcon("教师台账系统")
+
 	err := wails.Run(&options.App{
 		Title:     "教师台账系统",
 		Width:     1366,

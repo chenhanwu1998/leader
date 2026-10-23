@@ -98,7 +98,7 @@ async function resetAll() {
       <div class="card">
         <div class="card-title">课程设置（按班级）</div>
         <div style="color: #98a0b5; font-size: 12.5px; margin-bottom: 10px">
-          每个班级单独设置科目与任课教师（不同班级的任课教师可以不同）。用于课程表排课着色与教师显示；成绩录入使用全局科目表。
+          每个班级单独设置科目与任课教师（不同班级的任课教师可以不同）。早读、晚修、自习、班会 在此配置值班教师，课程表会同步显示；成绩录入使用全局科目表，不受这里影响。
         </div>
         <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px">
           <span style="color: #5a6378; font-size: 13px; font-weight: 600">班级</span>
@@ -111,7 +111,7 @@ async function resetAll() {
           <div class="subject-head">
             <span style="width: 44px">颜色</span>
             <span style="width: 110px">科目</span>
-            <span style="flex: 1">任课教师</span>
+            <span style="flex: 1">任课教师 / 值班教师</span>
             <span style="width: 34px" />
           </div>
           <div v-for="(s, i) in subjects" :key="i" class="subject-row">

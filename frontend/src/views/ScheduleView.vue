@@ -13,8 +13,8 @@ interface ScheduleConfig {
 }
 
 const WEEK = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-// 非学科类格子的固定底色
-const EXTRA_COLORS: Record<string, string> = { 自习: '#f5f6fa', 班会: '#f0faf5' }
+// 非学科类格子的固定底色（班级课程设置里的值班条目未加载完成时兜底）
+const EXTRA_COLORS: Record<string, string> = { 自习: '#f5f6fa', 班会: '#f0faf5', 早读: '#fdf6ec', 晚修: '#eef0fb' }
 
 function defaultConfig(): ScheduleConfig {
   return {

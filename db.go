@@ -199,6 +199,7 @@ func openDB(dir string) error {
 		}
 	}
 	migratePeriods()
+	migrateDutyCells()
 	return nil
 }
 
@@ -390,16 +391,42 @@ func getSubjects() []Subject {
 	return normalizeSubjects(raw)
 }
 
+// 值班类条目：始终补在班级课程之后（缺哪个补哪个），供课程表显示值班教师用。
+// 它们不进全局科目表，不会出现在成绩录入里。
+var dutyDefaults = []Subject{
+	{Name: "早读", Color: "#fdf6ec"},
+	{Name: "晚修", Color: "#eef0fb"},
+	{Name: "自习", Color: "#f5f6fa"},
+	{Name: "班会", Color: "#f0faf5"},
+}
+
+func withDutyEntries(list []Subject) []Subject {
+	out := append([]Subject{}, list...)
+	for _, d := range dutyDefaults {
+		found := false
+		for _, s := range out {
+			if s.Name == d.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // 班级专属课程：有配置按班级的，没有则回退全局科目表
 func getClassSubjects(className string) []Subject {
 	rows, err := queryAll(`SELECT name, color, teacher FROM class_subjects WHERE class_name = ? ORDER BY rowid`, className)
 	if err == nil && len(rows) > 0 {
 		raw, _ := json.Marshal(rows)
 		if list := normalizeSubjects(raw); len(list) > 0 {
-			return list
+			return withDutyEntries(list)
 		}
 	}
-	return getSubjects()
+	return withDutyEntries(getSubjects())
 }
 
 func setClassSubjects(className string, raw json.RawMessage) []Subject {
@@ -505,4 +532,70 @@ func migratePeriods() {
 		}
 	}
 	setSetting("mig_periods_v1", "1")
+}
+
+// 一次性迁移：把课表里「早读 / 晚修」行的空格填满（早读轮排语文/英语，晚修排自习），值班教师在课程设置里维护
+func migrateDutyCells() {
+	if getSetting("mig_duty_cells_v1", "") == "1" {
+		return
+	}
+	rows, err := queryAll(`SELECT class_name, config FROM schedules`)
+	if err == nil {
+		touched := 0
+		for _, row := range rows {
+			var cfg map[string]any
+			if json.Unmarshal([]byte(toStr(row["config"])), &cfg) != nil {
+				continue
+			}
+			rawTimes, ok := cfg["times"].([]any)
+			if !ok {
+				continue
+			}
+			rawDays, ok := cfg["days"].([]any)
+			if !ok {
+				continue
+			}
+			cells, _ := cfg["cells"].(map[string]any)
+			if cells == nil {
+				cells = map[string]any{}
+			}
+			changed := false
+			for i, t := range rawTimes {
+				name := toStr(t)
+				isMorning := strings.Contains(name, "早读")
+				isEvening := strings.Contains(name, "晚修")
+				if !isMorning && !isEvening {
+					continue
+				}
+				for _, d := range rawDays {
+					day := toInt(d)
+					key := fmt.Sprintf("%d-%d", day, i)
+					if v, ok := cells[key]; ok && toStr(v) != "" {
+						continue
+					}
+					if isMorning {
+						if day%2 == 0 {
+							cells[key] = "语文"
+						} else {
+							cells[key] = "英语"
+						}
+					} else {
+						cells[key] = "自习"
+					}
+					changed = true
+				}
+			}
+			if !changed {
+				continue
+			}
+			cfg["cells"] = cells
+			updated, _ := json.Marshal(cfg)
+			db.Exec(`UPDATE schedules SET config = ?, updated_at = datetime('now','localtime') WHERE class_name = ?`, string(updated), toStr(row["class_name"]))
+			touched++
+		}
+		if touched > 0 {
+			fmt.Printf("课表填充：%d 个班级的早读/晚修已排好\n", touched)
+		}
+	}
+	setSetting("mig_duty_cells_v1", "1")
 }
