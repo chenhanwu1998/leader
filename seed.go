@@ -1,0 +1,390 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"strings"
+)
+
+// 可复现的伪随机数（与 leader-sys scripts/seed.mjs 同款 mulberry32）
+type rng struct{ a uint32 }
+
+func newRng(seed uint32) *rng { return &rng{a: seed} }
+func (r *rng) next() float64 {
+	r.a += 0x6D2B79F5
+	t := r.a
+	t = (t ^ (t >> 15)) * (1 | t)
+	t = (t + ((t ^ (t >> 7)) * (61 | t))) ^ t
+	return float64(t^(t>>14)) / 4294967296.0
+}
+func (r *rng) pickOne(arr []string) string { return arr[int(math.Floor(r.next()*float64(len(arr))))] }
+func (r *rng) below(n int) int             { return int(math.Floor(r.next() * float64(n))) }
+
+var fatherNames = []string{"建国", "志强", "文博", "海涛", "宏伟", "国栋", "永强", "家明", "立军", "德福"}
+var motherNames = []string{"秀兰", "桂芳", "玉梅", "丽华", "淑珍", "雅芝", "春燕", "晓红", "慧敏", "婷婷"}
+var estates = []string{"阳光小区", "滨河花园", "文华苑", "书香门第", "幸福里", "朝阳新村", "绿城公寓", "和平家园"}
+
+var surnames = strings.Split("王李张刘陈杨赵黄周吴徐孙马朱胡郭何林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董潘袁蔡蒋余于杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤", "")
+
+var maleGiven = []string{
+	"子轩", "浩然", "宇航", "子墨", "俊杰", "明轩", "天佑", "嘉懿", "子豪", "昊天", "梓睿", "一鸣", "俊熙", "润泽",
+	"浩宇", "志强", "文博", "海涛", "宏伟", "宇辰", "瑞霖", "铭泽", "景行", "思远", "奕辰", "沐宸", "星辰", "皓轩",
+	"雨泽", "梓豪", "家豪", "伟杰", "文轩", "嘉豪", "志远", "哲宇", "昊然", "晟睿", "胤祥", "睿哲", "锦程", "卓然",
+	"君浩", "鸿涛", "烨磊", "擎宇", "致远", "俊驰", "鹤轩", "博文", "昊强", "伟宸", "越彬", "晟棋", "明哲", "立诚",
+}
+
+var femaleGiven = []string{
+	"诗涵", "雨桐", "欣怡", "芷若", "梦琪", "雅静", "雪晴", "佳颖", "婉婷", "若曦", "雪莹", "思琪", "欣悦", "语嫣",
+	"诗雨", "静怡", "雨薇", "梦洁", "晓彤", "雅芝", "欣彤", "语桐", "芷晴", "思涵", "雨欣", "佳琪", "静雯", "若彤",
+	"梓萱", "可欣", "梦瑶", "紫涵", "雨嘉", "欣然", "雅雯", "慧妍", "曼玉", "若楠", "晨曦", "心怡", "嘉怡", "晓萱",
+	"沛玲", "语琴", "听兰", "梦璐", "惠茜", "漫妮", "檀雅", "凌薇", "美琳", "欢馨", "优璇", "雨嘉", "娅楠", "明美",
+}
+
+func makeRoster(r *rng, count int) [][2]string {
+	used := map[string]bool{}
+	out := [][2]string{}
+	for guard := 0; len(out) < count && guard < 5000; guard++ {
+		male := r.next() < 0.52
+		given := femaleGiven
+		if male {
+			given = maleGiven
+		}
+		name := r.pickOne(surnames) + r.pickOne(given)
+		if used[name] {
+			continue
+		}
+		used[name] = true
+		g := "女"
+		if male {
+			g = "男"
+		}
+		out = append(out, [2]string{name, g})
+	}
+	return out
+}
+
+type seedClass struct {
+	name, grade, headTeacher, classroom, remark string
+	birthYear, size                             int
+}
+
+var seedClasses = []seedClass{
+	{"高一1班", "高一", "王丽华", "教学楼4层401", "实验班", 2010, 53},
+	{"高一2班", "高一", "李国强", "教学楼4层402", "", 2010, 55},
+	{"高一3班", "高一", "张敏", "教学楼4层403", "", 2010, 52},
+}
+
+var seedSubjects = []Subject{
+	{"语文", "#fef0f0", "陈静"}, {"数学", "#eef3ff", "刘国栋"}, {"英语", "#f4f0ff", "赵敏"},
+	{"物理", "#effaf7", "孙建军"}, {"化学", "#fef6ec", "周海燕"}, {"生物", "#edf9ff", "吴丽萍"},
+	{"政治", "#fdf2e8", "郑永刚"}, {"历史", "#f7efe2", "王文博"}, {"地理", "#eef9f0", "林晓东"},
+	{"体育", "#fff7e0", "马腾飞"}, {"音乐", "#fdeef5", "许雅琴"}, {"美术", "#f0fbff", "苏曼"},
+	{"信息", "#eef1f8", "高翔"},
+}
+
+var scoreFull = []struct {
+	name string
+	full float64
+}{
+	{"语文", 150}, {"数学", 150}, {"英语", 150}, {"物理", 100}, {"化学", 100},
+	{"生物", 100}, {"政治", 100}, {"历史", 100}, {"地理", 100},
+}
+
+var seedExams = []struct {
+	name, date, term, typ, className, remark string
+}{
+	{"高一入学摸底测试", "2026-09-05", "2026-2027学年第一学期", "摸底", "", "入学学情摸底"},
+	{"高一9月月考", "2026-09-29", "2026-2027学年第一学期", "月考", "", ""},
+	{"高一上学期期中考试", "2026-10-30", "2026-2027学年第一学期", "期中", "", "九科联考"},
+}
+
+// 记录引用方式：[班级序号, 班内学号序号, ...字段]
+var seedLeaves = [][]any{
+	{0, 4, "事假", "2026-09-08", "2026-09-08", 1, "家中有事，晚一天报到", "已销假"},
+	{0, 1, "病假", "2026-09-11", "2026-09-12", 2, "感冒发烧", "已销假"},
+	{0, 27, "事假", "2026-09-15", "2026-09-15", 1, "家中有事", "已销假"},
+	{1, 2, "病假", "2026-09-18", "2026-09-19", 2, "急性肠胃炎", "已销假"},
+	{1, 18, "事假", "2026-09-22", "2026-09-23", 2, "随父母参加亲戚婚礼", "已销假"},
+	{2, 30, "病假", "2026-09-25", "2026-09-26", 2, "过敏性鼻炎", "已销假"},
+	{0, 8, "病假", "2026-10-09", "2026-10-10", 2, "发烧", "已销假"},
+	{2, 12, "病假", "2026-10-13", "2026-10-14", 2, "咽炎", "已销假"},
+	{1, 40, "事假", "2026-10-13", "2026-10-13", 1, "牙齿矫正复诊", "已销假"},
+	{2, 5, "病假", "2026-10-15", "2026-10-16", 2, "感冒", "已销假"},
+	{0, 33, "其他", "2026-10-17", "2026-10-17", 1, "代表学校参加市青少年科技创新大赛", "已销假"},
+	{1, 9, "病假", "2026-10-20", "2026-10-21", 2, "感冒发烧", "已销假"},
+	{0, 45, "事假", "2026-10-21", "2026-10-21", 1, "家中有事", "已销假"},
+	{2, 20, "病假", "2026-10-22", "2026-10-24", 3, "支原体感染，需输液治疗", "请假中"},
+	{1, 25, "事假", "2026-10-23", "2026-10-24", 2, "随父母外出探亲", "请假中"},
+}
+
+var seedRewards = [][]any{
+	{0, 15, "表扬", "班级", "作业书写工整", "2026-09-10", "连续两周作业评为优秀范例"},
+	{0, 0, "表扬", "班级", "课堂发言积极", "2026-09-12", "主动举手回答问题，思路清晰"},
+	{1, 31, "表扬", "校级", "拾金不昧", "2026-09-16", "在操场捡到运动相机主动上交"},
+	{0, 6, "奖励", "市级", "市高中数学竞赛二等奖", "2026-09-24", "开学即代表学校参赛获奖"},
+	{1, 0, "表扬", "班级", "热心帮助同学", "2026-09-25", "主动利用课间给同桌讲解物理题"},
+	{2, 8, "表扬", "班级", "主动整理图书角", "2026-09-28", "坚持每周整理班级图书角"},
+	{0, 20, "奖励", "县区", "区三好学生", "2026-09-30", "初中阶段综合表现突出"},
+	{1, 44, "批评", "班级", "课堂打闹", "2026-10-09", "自习课上与同桌打闹，影响课堂秩序"},
+	{2, 2, "表扬", "班级", "朗读展示优秀", "2026-10-10", "语文早读领读示范"},
+	{0, 38, "奖励", "校级", "英语演讲比赛二等奖", "2026-10-14", "校英语风采大赛高一组二等奖"},
+	{1, 13, "表扬", "班级", "学习成绩进步显著", "2026-10-15", "9月月考较摸底测试总分提升46分"},
+	{2, 33, "批评", "班级", "作业多次拖欠", "2026-10-16", "一周内三次未交数学作业"},
+	{0, 50, "表扬", "班级", "卫生标兵", "2026-10-17", "值日认真负责，台面地面整洁"},
+	{1, 48, "奖励", "校级", "校运会1500米第一名", "2026-10-18", "秋季校运会高一男子1500米冠军"},
+	{2, 15, "批评", "班级", "多次忘带课本", "2026-10-20", "本周三次忘带课本，已与家长沟通"},
+	{1, 52, "批评", "班级", "晚自习喧哗", "2026-10-21", "晚自习与邻座讲话，提醒后仍未改正"},
+}
+
+var seedContacts = [][]any{
+	{0, 1, "2026-09-12", "电话", "家长", "反馈近期数学计算错误较多，建议每天坚持20分钟限时训练", "家长会配合督促，每天检查作业"},
+	{0, 27, "2026-09-15", "微信", "家长", "提醒流感疫苗接种时间，回执单请周四前交回", "已预约周六接种"},
+	{1, 18, "2026-09-22", "面谈", "家长", "约谈课堂纪律问题，孩子近期上课注意力分散", "家长表示会配合教育，减少电子产品使用"},
+	{1, 31, "2026-09-26", "家访", "家长", "了解在家学习环境，孩子每天坚持阅读半小时", "家庭学习氛围良好"},
+	{2, 30, "2026-09-30", "电话", "家长", "表扬孩子乐于助人，主动帮助学习困难的同学", "家长表示感谢老师的关注"},
+	{2, 33, "2026-10-10", "电话", "家长", "反馈作业拖欠情况，商定家校共同检查机制", "家长承诺每晚检查作业完成情况并签字"},
+	{0, 6, "2026-10-14", "电话", "家长", "报喜：孩子获得市数学竞赛二等奖", "家长很高兴，感谢老师培养"},
+	{2, 2, "2026-10-15", "微信", "家长", "提醒补交请假手续（书面请假条）", "明天让孩子带回"},
+	{1, 40, "2026-10-17", "家访", "家长", "交流升入高中后的学习适应情况", "孩子适应良好，家长希望关注偏科问题"},
+	{0, 4, "2026-10-19", "电话", "家长", "提醒按时接送，近期有两次晚自习放学等待时间较长", "会调整工作安排，准时接送"},
+	{0, 45, "2026-10-20", "微信", "学生", "沟通课后答疑安排，鼓励其参加数学竞赛兴趣小组", "学生表示愿意参加"},
+	{2, 20, "2026-10-23", "微信", "家长", "询问支原体感染恢复情况，提醒返校后带病历和缓考申请", "预计下周一返校，会带好相关材料"},
+}
+
+// 高一1班课程表（cells 键为 “星期-节次”，均从 0 起）
+var seedSchedule = map[string]any{
+	"days":  []int{0, 1, 2, 3, 4},
+	"times": []string{"第1节", "第2节", "第3节", "第4节", "第5节", "第6节", "第7节", "第8节"},
+	"timeNotes": []string{"07:50-08:30", "08:40-09:20", "09:40-10:20", "10:30-11:10",
+		"14:00-14:40", "14:50-15:30", "15:50-16:30", "16:40-17:20"},
+	"breaksAfter": []int{4},
+	"cells": map[string]string{
+		"0-0": "语文", "0-1": "数学", "0-2": "英语", "0-3": "物理", "0-4": "化学", "0-5": "体育", "0-6": "自习", "0-7": "班会",
+		"1-0": "数学", "1-1": "英语", "1-2": "语文", "1-3": "生物", "1-4": "地理", "1-5": "政治", "1-6": "体育", "1-7": "自习",
+		"2-0": "英语", "2-1": "语文", "2-2": "数学", "2-3": "物理", "2-4": "历史", "2-5": "化学", "2-6": "美术", "2-7": "自习",
+		"3-0": "数学", "3-1": "语文", "3-2": "英语", "3-3": "生物", "3-4": "物理", "3-5": "政治", "3-6": "信息", "3-7": "自习",
+		"4-0": "语文", "4-1": "数学", "4-2": "地理", "4-3": "历史", "4-4": "化学", "4-5": "音乐", "4-6": "体育", "4-7": "自习",
+	},
+}
+
+type seededStudent struct {
+	id   int64
+	name string
+}
+
+func clearAllTables(tx *sql.Tx) error {
+	for _, t := range []string{"scores", "leaves", "rewards", "contacts", "exams", "students", "classes", "seat_layouts", "schedules"} {
+		if _, err := tx.Exec("DELETE FROM " + t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seedDemo 灌入演示数据：高一 3 个班（每班 50+ 人）、九科成绩、请假/奖惩/家校、座位表、课程表
+func seedDemo(force bool) error {
+	if !force {
+		if c := queryCount(`SELECT COUNT(*) c FROM students`); c > 0 {
+			return fmt.Errorf("数据库已有 %d 名学生，未做改动", c)
+		}
+	}
+	r := newRng(20261023)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if force {
+		if err := clearAllTables(tx); err != nil {
+			return err
+		}
+	}
+
+	// 基础设置
+	for _, kv := range [][2]string{
+		{"teacher_name", "王丽华"},
+		{"term", "2026-2027学年第一学期"},
+	} {
+		if _, err := tx.Exec(`INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	subJSON, _ := json.Marshal(seedSubjects)
+	if _, err := tx.Exec(`INSERT INTO settings(key, value) VALUES('subjects', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, string(subJSON)); err != nil {
+		return err
+	}
+
+	// 班级
+	insClass, err := tx.Prepare(`INSERT INTO classes(name, grade, head_teacher, classroom, remark) VALUES (?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	for _, c := range seedClasses {
+		if _, err := insClass.Exec(c.name, c.grade, c.headTeacher, c.classroom, c.remark); err != nil {
+			return err
+		}
+	}
+	insClass.Close()
+
+	// 学生（学号为班内序号）
+	insStudent, err := tx.Prepare(`INSERT INTO students(student_no, name, gender, class_name, birth_date, phone, parent_name, parent_phone, address, status, remark)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	classStudents := make([][]seededStudent, len(seedClasses))
+	studentCount := 0
+	phonePrefixes := []string{"30", "35", "37", "38", "39", "50", "51", "55", "56", "58", "86", "88"}
+	for ci, c := range seedClasses {
+		roster := makeRoster(r, c.size)
+		ids := []seededStudent{}
+		for i, item := range roster {
+			name, gender := item[0], item[1]
+			birthYear := c.birthYear
+			if r.next() >= 0.85 {
+				birthYear--
+			}
+			birth := fmt.Sprintf("%d-%02d-%02d", birthYear, 1+r.below(12), 1+r.below(28))
+			surname := string([]rune(name)[0])
+			parentName := surname + motherNames[r.below(len(motherNames))]
+			if r.next() < 0.55 {
+				parentName = surname + fatherNames[r.below(len(fatherNames))]
+			}
+			phone := fmt.Sprintf("1%s%08d", r.pickOne(phonePrefixes), r.below(100000000))
+			parentPhone := fmt.Sprintf("1%s%08d", r.pickOne(phonePrefixes), r.below(100000000))
+			address := fmt.Sprintf("%s%d栋%d单元%d0%d室", r.pickOne(estates), 1+r.below(20), 1+r.below(4), 1+r.below(18), 1+r.below(9))
+			if r.next() >= 0.3 {
+				phone = ""
+			}
+			res, err := insStudent.Exec(fmt.Sprintf("%d", i+1), name, gender, c.name, birth, phone, parentName, parentPhone, address, "在读", "")
+			if err != nil {
+				return err
+			}
+			id, _ := res.LastInsertId()
+			ids = append(ids, seededStudent{id, name})
+			studentCount++
+		}
+		classStudents[ci] = ids
+	}
+	insStudent.Close()
+	stuAt := func(ci, ni int) seededStudent { return classStudents[ci][ni] }
+
+	// 考试 + 成绩（语数英满分 150，其余 100；带个体内差异与逐次微升趋势）
+	insExam, err := tx.Prepare(`INSERT INTO exams(name, exam_date, term, type, class_name, remark) VALUES (?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	insScore, err := tx.Prepare(`INSERT INTO scores(exam_id, student_id, subject, score, full_score) VALUES (?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	scoreCount := 0
+	ability := map[int64]float64{}
+	for _, list := range classStudents {
+		for _, s := range list {
+			ability[s.id] = 0.58 + r.next()*0.34
+		}
+	}
+	for examIdx, e := range seedExams {
+		res, err := insExam.Exec(e.name, e.date, e.term, e.typ, e.className, e.remark)
+		if err != nil {
+			return err
+		}
+		examID, _ := res.LastInsertId()
+		for _, list := range classStudents {
+			for _, s := range list {
+				ab := ability[s.id] + float64(examIdx)*0.012
+				for _, sub := range scoreFull {
+					score := math.Round(sub.full * (ab + (r.next()*0.16 - 0.08)))
+					score = math.Max(math.Round(sub.full*0.35), math.Min(sub.full, score))
+					if _, err := insScore.Exec(examID, s.id, sub.name, score, sub.full); err != nil {
+						return err
+					}
+					scoreCount++
+				}
+			}
+		}
+	}
+	insExam.Close()
+	insScore.Close()
+
+	// 请假
+	insLeave, err := tx.Prepare(`INSERT INTO leaves(student_id, type, start_date, end_date, days, reason, status, remark) VALUES (?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	for _, l := range seedLeaves {
+		s := stuAt(l[0].(int), l[1].(int))
+		if _, err := insLeave.Exec(s.id, l[2], l[3], l[4], l[5], l[6], l[7], ""); err != nil {
+			return err
+		}
+	}
+	insLeave.Close()
+
+	// 奖惩
+	insReward, err := tx.Prepare(`INSERT INTO rewards(student_id, kind, level, title, record_date, reason, remark) VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	for _, rw := range seedRewards {
+		s := stuAt(rw[0].(int), rw[1].(int))
+		if _, err := insReward.Exec(s.id, rw[2], rw[3], rw[4], rw[5], rw[6], ""); err != nil {
+			return err
+		}
+	}
+	insReward.Close()
+
+	// 家校联系
+	insContact, err := tx.Prepare(`INSERT INTO contacts(student_id, contact_date, way, target, content, feedback, remark) VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	for _, ct := range seedContacts {
+		s := stuAt(ct[0].(int), ct[1].(int))
+		if _, err := insContact.Exec(s.id, ct[2], ct[3], ct[4], ct[5], ct[6], ""); err != nil {
+			return err
+		}
+	}
+	insContact.Close()
+
+	// 座位表：高一1班 7×8，按学号顺序就座
+	c1 := classStudents[0]
+	assignments := make([]map[string]any, 0, len(c1))
+	for i, s := range c1 {
+		assignments = append(assignments, map[string]any{"row": i / 8, "col": i % 8, "student_id": s.id})
+	}
+	assignJSON, _ := json.Marshal(assignments)
+	if _, err := tx.Exec(`INSERT INTO seat_layouts(class_name, rows, cols, group_size, assignments) VALUES (?,?,?,?,?)`,
+		seedClasses[0].name, 7, 8, 2, string(assignJSON)); err != nil {
+		return err
+	}
+
+	// 课程表：高一1班
+	schedJSON, _ := json.Marshal(seedSchedule)
+	if _, err := tx.Exec(`INSERT INTO schedules(class_name, config) VALUES (?,?)`, seedClasses[0].name, string(schedJSON)); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	setSetting("seeded", "1")
+	log.Printf("演示数据：%d 个班级 / %d 名学生 / %d 场考试 %d 条成绩", len(seedClasses), studentCount, len(seedExams), scoreCount)
+	return nil
+}
+
+// maybeSeed 首次启动（settings 无 seeded 标记）时自动灌入演示数据
+func maybeSeed() {
+	if getSetting("seeded", "") != "" {
+		return
+	}
+	if err := seedDemo(false); err != nil {
+		log.Printf("演示数据灌入跳过：%v", err)
+		setSetting("seeded", "1")
+	}
+}
