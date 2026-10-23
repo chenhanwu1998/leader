@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { fetchClasses, fetchSubjects, get, put, type SubjectInfo } from '@/api'
+import { fetchClasses, fetchClassSubjects, get, put, type SubjectInfo } from '@/api'
 import { exportExcel } from '@/utils/excel'
 
 interface ScheduleConfig {
@@ -19,11 +19,27 @@ const EXTRA_COLORS: Record<string, string> = { 自习: '#f5f6fa', 班会: '#f0fa
 function defaultConfig(): ScheduleConfig {
   return {
     days: [0, 1, 2, 3, 4],
-    times: ['第1节', '第2节', '第3节', '第4节', '第5节', '第6节', '第7节', '第8节'],
-    timeNotes: ['08:00', '08:55', '10:05', '10:55', '14:00', '14:55', '16:00', '16:55'],
-    breaksAfter: [4],
+    times: ['早读', '第1节', '第2节', '第3节', '第4节', '第5节', '第6节', '第7节', '第8节', '晚修1', '晚修2'],
+    timeNotes: ['07:20-07:50', '08:00-08:40', '08:55-09:35', '10:05-10:45', '10:55-11:35', '14:00-14:40', '14:55-15:35', '16:00-16:40', '16:55-17:35', '19:00-19:45', '19:55-20:40'],
+    breaksAfter: [5, 9],
     cells: {},
   }
+}
+
+// timeNotes 存的是展示文本（如 "07:50-08:30" 或旧的单点时间 "08:00"），编辑时拆成起止两段时间
+function noteParts(note: string): { start: string; end: string } {
+  const range = /^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/.exec(note ?? '')
+  if (range) return { start: range[1]!, end: range[2]! }
+  const single = /^(\d{1,2}:\d{2})$/.exec(note ?? '')
+  if (single) return { start: single[1]!, end: '' }
+  return { start: '', end: '' }
+}
+
+function setNotePart(note: string, part: 'start' | 'end', v: string): string {
+  const p = noteParts(note)
+  p[part] = v
+  if (p.start && p.end) return `${p.start}-${p.end}`
+  return p.start || p.end
 }
 
 const className = ref('')
@@ -46,8 +62,12 @@ function cellKey(day: number, period: number) {
 
 async function onClassChange() {
   if (!className.value) return
-  const data = await get(`/api/schedule/${encodeURIComponent(className.value)}`)
+  const [data, subs] = await Promise.all([
+    get(`/api/schedule/${encodeURIComponent(className.value)}`),
+    fetchClassSubjects(className.value),
+  ])
   config.value = data.config ? { ...defaultConfig(), ...data.config } : defaultConfig()
+  subjects.value = subs
   loaded.value = true
 }
 
@@ -128,11 +148,9 @@ function exportSchedule() {
 }
 
 onMounted(async () => {
-  const [cls, subs] = await Promise.all([fetchClasses(), fetchSubjects()])
-  classes.value = cls
-  subjects.value = subs
-  if (cls.length) {
-    className.value = cls[0]!
+  classes.value = await fetchClasses()
+  if (classes.value.length) {
+    className.value = classes.value[0]!
     await onClassChange()
   }
 })
@@ -222,7 +240,7 @@ onMounted(async () => {
     </el-dialog>
 
     <!-- 节次设置 -->
-    <el-dialog v-model="cfgDialog" title="节次与作息设置" width="560px">
+    <el-dialog v-model="cfgDialog" title="节次与作息设置" width="620px">
       <div class="cfg-section">
         <div class="cfg-label">上课日</div>
         <el-checkbox-group v-model="config.days">
@@ -230,13 +248,23 @@ onMounted(async () => {
         </el-checkbox-group>
       </div>
       <div class="cfg-section">
-        <div class="cfg-label">节次（名称 / 上课时间）</div>
+        <div class="cfg-label">节次（名称 / 开始时间 / 结束时间）</div>
         <div v-for="(_t, i) in config.times" :key="i" class="period-cfg">
-          <el-input v-model="config.times[i]" size="small" style="width: 110px" />
-          <el-time-select v-model="config.timeNotes[i]" size="small" start="06:00" step="00:05" end="22:30" placeholder="时间" style="width: 120px" />
+          <el-input v-model="config.times[i]" size="small" style="width: 96px" />
+          <el-time-select
+            :model-value="noteParts(config.timeNotes[i] ?? '').start"
+            size="small" start="06:00" step="00:05" end="22:30" placeholder="开始" style="width: 106px"
+            @change="(v: string) => (config.timeNotes[i] = setNotePart(config.timeNotes[i] ?? '', 'start', v ?? ''))"
+          />
+          <span class="time-sep">至</span>
+          <el-time-select
+            :model-value="noteParts(config.timeNotes[i] ?? '').end"
+            size="small" start="06:00" step="00:05" end="23:30" placeholder="结束" style="width: 106px"
+            @change="(v: string) => (config.timeNotes[i] = setNotePart(config.timeNotes[i] ?? '', 'end', v ?? ''))"
+          />
           <el-checkbox v-if="i < config.times.length - 1" :model-value="config.breaksAfter.includes(i + 1)"
             @change="(v: boolean) => { const idx = config.breaksAfter.indexOf(i + 1); if (v && idx < 0) config.breaksAfter.push(i + 1); if (!v && idx >= 0) config.breaksAfter.splice(idx, 1) }">
-            节后插分隔
+            插分隔
           </el-checkbox>
           <el-button link type="danger" size="small" @click="config.times.splice(i, 1); config.timeNotes.splice(i, 1); config.breaksAfter = config.breaksAfter.filter((b) => b <= config.times.length);">
             删除
@@ -381,7 +409,12 @@ onMounted(async () => {
 .period-cfg {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin-bottom: 8px;
+}
+
+.time-sep {
+  color: #aab1c5;
+  font-size: 12px;
 }
 </style>

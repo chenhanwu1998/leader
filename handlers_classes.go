@@ -39,6 +39,33 @@ func registerClassRoutes(mux *http.ServeMux) {
 		writeJSON(w, 200, names)
 	})
 
+	// 班级专属课程设置（无班级配置时回退全局科目表）
+	mux.HandleFunc("GET /api/classes/{className}/subjects", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, getClassSubjects(r.PathValue("className")))
+	})
+
+	mux.HandleFunc("PUT /api/classes/{className}/subjects", func(w http.ResponseWriter, r *http.Request) {
+		className := strings.TrimSpace(r.PathValue("className"))
+		if className == "" {
+			fail(w, 400, "班级名称不能为空")
+			return
+		}
+		raw, err := decodeBodyRaw(r)
+		if err != nil {
+			fail(w, 400, "请求格式错误")
+			return
+		}
+		if len(normalizeSubjects(raw)) == 0 {
+			fail(w, 400, "至少保留一个科目")
+			return
+		}
+		if tx, err := db.Begin(); err == nil {
+			ensureClass(tx, className)
+			tx.Commit()
+		}
+		writeJSON(w, 200, setClassSubjects(className, raw))
+	})
+
 	mux.HandleFunc("POST /api/classes", func(w http.ResponseWriter, r *http.Request) {
 		body, err := decodeBody(r)
 		if err != nil {
@@ -128,6 +155,7 @@ func registerClassRoutes(mux *http.ServeMux) {
 				{`UPDATE seat_layouts SET class_name = ? WHERE class_name = ?`, ""},
 				{`UPDATE schedules SET class_name = ? WHERE class_name = ?`, ""},
 				{`UPDATE exams SET class_name = ? WHERE class_name = ?`, ""},
+				{`UPDATE class_subjects SET class_name = ? WHERE class_name = ?`, ""},
 			} {
 				if _, err := tx.Exec(q[0], newName, oldName); err != nil {
 					fail(w, 500, err.Error())
@@ -169,6 +197,10 @@ func registerClassRoutes(mux *http.ServeMux) {
 			return
 		}
 		if _, err := tx.Exec(`DELETE FROM schedules WHERE class_name = ?`, name); err != nil {
+			fail(w, 500, err.Error())
+			return
+		}
+		if _, err := tx.Exec(`DELETE FROM class_subjects WHERE class_name = ?`, name); err != nil {
 			fail(w, 500, err.Error())
 			return
 		}

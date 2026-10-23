@@ -27,5 +27,10 @@ export interface SubjectInfo {
 export const fetchClasses = (): Promise<string[]> => get('/api/classes/names')
 export const fetchClassList = (): Promise<any[]> => get('/api/classes')
 export const fetchSubjects = (): Promise<SubjectInfo[]> => get('/api/settings/subjects')
+// 班级专属课程设置（班级未配置时服务端回退为全局科目表）
+export const fetchClassSubjects = (className: string): Promise<SubjectInfo[]> =>
+  get(`/api/classes/${encodeURIComponent(className)}/subjects`)
+export const saveClassSubjects = (className: string, subjects: SubjectInfo[]): Promise<SubjectInfo[]> =>
+  put(`/api/classes/${encodeURIComponent(className)}/subjects`, subjects)
 export const fetchStudents = (className = ''): Promise<any[]> =>
   get(className ? `/api/students?class_name=${encodeURIComponent(className)}` : '/api/students')

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { get, post, put, type SubjectInfo } from '@/api'
+import { fetchClasses, fetchClassSubjects, saveClassSubjects, get, post, put, type SubjectInfo } from '@/api'
 
 const teacher = ref('')
 const term = ref('')
 const subjects = ref<SubjectInfo[]>([])
+const classes = ref<string[]>([])
+const subjectClass = ref('')
 const resetInput = ref('')
 const resetting = ref(false)
 
@@ -16,11 +18,20 @@ onMounted(async () => {
   try {
     teacher.value = (await get('/api/settings/teacher_name')).value
     term.value = (await get('/api/settings/term')).value
-    subjects.value = await get('/api/settings/subjects')
+    classes.value = await fetchClasses()
+    if (classes.value.length) {
+      subjectClass.value = classes.value[0]!
+      await loadSubjects()
+    }
   } catch {
     /* ignore */
   }
 })
+
+async function loadSubjects() {
+  if (!subjectClass.value) return
+  subjects.value = await fetchClassSubjects(subjectClass.value)
+}
 
 async function saveBasic() {
   await put('/api/settings/teacher_name', { value: teacher.value })
@@ -33,11 +44,12 @@ function addSubject() {
 }
 
 async function saveSubjects() {
+  if (!subjectClass.value) return ElMessage.warning('请先在「学生花名册」中建立班级')
   const names = subjects.value.map((s) => s.name.trim()).filter(Boolean)
   if (new Set(names).size !== names.length) return ElMessage.warning('存在重名科目，请先修改')
   if (!names.length) return ElMessage.warning('至少保留一个科目')
-  await put('/api/settings/subjects', subjects.value.filter((s) => s.name.trim()))
-  ElMessage.success('科目列表已保存，课程表即时生效')
+  await saveClassSubjects(subjectClass.value, subjects.value.filter((s) => s.name.trim()))
+  ElMessage.success(`「${subjectClass.value}」课程设置已保存，课程表即时生效`)
 }
 
 function backup() {
@@ -84,26 +96,35 @@ async function resetAll() {
       </div>
 
       <div class="card">
-        <div class="card-title">科目管理</div>
+        <div class="card-title">课程设置（按班级）</div>
         <div style="color: #98a0b5; font-size: 12.5px; margin-bottom: 10px">
-          用于成绩录入与课程表排课。课程表格子按科目颜色着色，并显示任课教师。
+          每个班级单独设置科目与任课教师（不同班级的任课教师可以不同）。用于课程表排课着色与教师显示；成绩录入使用全局科目表。
         </div>
-        <div class="subject-head">
-          <span style="width: 44px">颜色</span>
-          <span style="width: 110px">科目</span>
-          <span style="flex: 1">任课教师</span>
-          <span style="width: 34px" />
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px">
+          <span style="color: #5a6378; font-size: 13px; font-weight: 600">班级</span>
+          <el-select v-model="subjectClass" placeholder="选择班级" style="width: 160px" @change="loadSubjects">
+            <el-option v-for="c in classes" :key="c" :value="c" :label="c" />
+          </el-select>
+          <span v-if="!classes.length" style="color: #aab1c5; font-size: 12px">还没有班级，请先在「学生花名册」中添加</span>
         </div>
-        <div v-for="(s, i) in subjects" :key="i" class="subject-row">
-          <el-color-picker v-model="s.color" size="small" :predefine="PALETTE" />
-          <el-input v-model="s.name" size="small" placeholder="科目名称" style="width: 110px" />
-          <el-input v-model="s.teacher" size="small" placeholder="教师姓名（可空）" style="flex: 1" />
-          <el-button link type="danger" size="small" @click="subjects.splice(i, 1)"><el-icon><Delete /></el-icon></el-button>
-        </div>
-        <div style="display: flex; gap: 10px; margin-top: 12px">
-          <el-button size="small" plain @click="addSubject"><el-icon style="margin-right: 4px"><Plus /></el-icon>添加科目</el-button>
-          <el-button type="primary" size="small" @click="saveSubjects">保存科目</el-button>
-        </div>
+        <template v-if="subjectClass">
+          <div class="subject-head">
+            <span style="width: 44px">颜色</span>
+            <span style="width: 110px">科目</span>
+            <span style="flex: 1">任课教师</span>
+            <span style="width: 34px" />
+          </div>
+          <div v-for="(s, i) in subjects" :key="i" class="subject-row">
+            <el-color-picker v-model="s.color" size="small" :predefine="PALETTE" />
+            <el-input v-model="s.name" size="small" placeholder="科目名称" style="width: 110px" />
+            <el-input v-model="s.teacher" size="small" placeholder="教师姓名（可空）" style="flex: 1" />
+            <el-button link type="danger" size="small" @click="subjects.splice(i, 1)"><el-icon><Delete /></el-icon></el-button>
+          </div>
+          <div style="display: flex; gap: 10px; margin-top: 12px">
+            <el-button size="small" plain @click="addSubject"><el-icon style="margin-right: 4px"><Plus /></el-icon>添加科目</el-button>
+            <el-button type="primary" size="small" @click="saveSubjects">保存课程设置</el-button>
+          </div>
+        </template>
       </div>
 
       <div class="card">

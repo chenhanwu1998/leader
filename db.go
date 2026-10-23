@@ -127,6 +127,14 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS class_subjects (
+  class_name TEXT NOT NULL,
+  name TEXT NOT NULL,
+  color TEXT DEFAULT '',
+  teacher TEXT DEFAULT '',
+  PRIMARY KEY (class_name, name)
+);
 `
 
 // dbDir 数据目录：优先 exe 同级 data/，不可写时退回 %APPDATA%\teacher-ledger\data
@@ -190,6 +198,7 @@ func openDB(dir string) error {
 			return err
 		}
 	}
+	migratePeriods()
 	return nil
 }
 
@@ -379,4 +388,121 @@ func getSubjects() []Subject {
 	}
 	raw, _ := json.Marshal(defaultSubjects)
 	return normalizeSubjects(raw)
+}
+
+// 班级专属课程：有配置按班级的，没有则回退全局科目表
+func getClassSubjects(className string) []Subject {
+	rows, err := queryAll(`SELECT name, color, teacher FROM class_subjects WHERE class_name = ? ORDER BY rowid`, className)
+	if err == nil && len(rows) > 0 {
+		raw, _ := json.Marshal(rows)
+		if list := normalizeSubjects(raw); len(list) > 0 {
+			return list
+		}
+	}
+	return getSubjects()
+}
+
+func setClassSubjects(className string, raw json.RawMessage) []Subject {
+	list := normalizeSubjects(raw)
+	tx, err := db.Begin()
+	if err == nil {
+		tx.Exec(`DELETE FROM class_subjects WHERE class_name = ?`, className)
+		for _, s := range list {
+			tx.Exec(`INSERT INTO class_subjects(class_name, name, color, teacher) VALUES (?,?,?,?)`, className, s.Name, s.Color, s.Teacher)
+		}
+		tx.Commit()
+	}
+	return list
+}
+
+// 一次性迁移：给已有课程表补上「早读」（插到最前，格子索引整体后移）和两节「晚修」（追加到末尾）
+func migratePeriods() {
+	if getSetting("mig_periods_v1", "") == "1" {
+		return
+	}
+	rows, err := queryAll(`SELECT class_name, config FROM schedules`)
+	if err == nil {
+		touched := 0
+		for _, row := range rows {
+			var cfg map[string]any
+			if json.Unmarshal([]byte(toStr(row["config"])), &cfg) != nil {
+				continue
+			}
+			rawTimes, ok := cfg["times"].([]any)
+			if !ok {
+				continue
+			}
+			times := make([]string, 0, len(rawTimes)+3)
+			for _, t := range rawTimes {
+				times = append(times, toStr(t))
+			}
+			notes := []string{}
+			if rawNotes, ok := cfg["timeNotes"].([]any); ok {
+				for _, n := range rawNotes {
+					notes = append(notes, toStr(n))
+				}
+			}
+			for len(notes) < len(times) {
+				notes = append(notes, "")
+			}
+			breaks := []any{}
+			if rawBreaks, ok := cfg["breaksAfter"].([]any); ok {
+				breaks = rawBreaks
+			}
+			hasMorning, hasEvening := false, false
+			for _, t := range times {
+				if strings.Contains(t, "早读") {
+					hasMorning = true
+				}
+				if strings.Contains(t, "晚修") {
+					hasEvening = true
+				}
+			}
+			shift := 0
+			changed := false
+			if !hasMorning {
+				times = append([]string{"早读"}, times...)
+				notes = append([]string{"07:20-07:50"}, notes...)
+				shift = 1
+				changed = true
+			}
+			if !hasEvening {
+				times = append(times, "晚修1", "晚修2")
+				notes = append(notes, "19:00-19:45", "19:55-20:40")
+				changed = true
+			}
+			if !changed {
+				continue
+			}
+			if shift == 1 {
+				cells, _ := cfg["cells"].(map[string]any)
+				remapped := map[string]any{}
+				for k, v := range cells {
+					if idx := strings.LastIndex(k, "-"); idx > 0 {
+						var p int
+						if _, err := fmt.Sscan(k[idx+1:], &p); err == nil {
+							remapped[k[:idx+1]+fmt.Sprintf("%d", p+1)] = v
+							continue
+						}
+					}
+					remapped[k] = v
+				}
+				cfg["cells"] = remapped
+				newBreaks := []any{}
+				for _, b := range breaks {
+					newBreaks = append(newBreaks, toInt(b)+1)
+				}
+				cfg["breaksAfter"] = newBreaks
+			}
+			cfg["times"] = times
+			cfg["timeNotes"] = notes
+			updated, _ := json.Marshal(cfg)
+			db.Exec(`UPDATE schedules SET config = ?, updated_at = datetime('now','localtime') WHERE class_name = ?`, string(updated), toStr(row["class_name"]))
+			touched++
+		}
+		if touched > 0 {
+			fmt.Printf("课程表迁移：%d 个班级已补上早读/晚修节次\n", touched)
+		}
+	}
+	setSetting("mig_periods_v1", "1")
 }
