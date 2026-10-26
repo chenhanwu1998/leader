@@ -206,6 +206,28 @@ function pickScale(id: string) {
 const quizProgress = computed(() => (quiz.scale ? quiz.answers.filter((a) => a >= 0).length : 0))
 const submittingQuiz = ref(false)
 
+// 作答明细：每题得分（反向题按 lo+hi-v 折算，与服务端口径一致）
+const resultDetail = computed(() => {
+  const s = quiz.scale
+  if (!quiz.result || !s) return []
+  const scores = s.options.map((o) => o.score)
+  const lo = Math.min(...scores)
+  const hi = Math.max(...scores)
+  const rev = new Set(s.reverse)
+  return s.items.map((item, i) => {
+    let v = quiz.answers[i]
+    if (v === 0 && lo >= 1) v = 1 // 与服务端历史兼容口径一致
+    const reversed = rev.has(i)
+    return {
+      no: i + 1,
+      item,
+      label: s.options.find((o) => o.score === quiz.answers[i])?.label ?? String(quiz.answers[i]),
+      score: reversed ? lo + hi - v : v,
+      reversed,
+    }
+  })
+})
+
 // 结果解释：得分命中的分档 note + 触发预警题时的说明
 const resultNote = computed(() => {
   if (!quiz.result || !quiz.scale) return ''
@@ -375,7 +397,7 @@ async function saveScaleDialog() {
   if (!scaleForm.id.trim() || !/^[A-Za-z0-9_-]{1,32}$/.test(scaleForm.id.trim())) return ElMessage.warning('量表编号须为 1-32 位字母/数字/中划线/下划线')
   if (!scaleForm.name.trim()) return ElMessage.warning('请填写量表名称')
   if (!items.length) return ElMessage.warning('请至少填写一道题目（每行一题）')
-  if (scaleForm.options.length < 2) return ElMessage.warning('请至少保留两个选项')
+  if (scaleForm.options.length < 2 || scaleForm.options.length > 7) return ElMessage.warning('选项数量需在 2-7 个之间')
   if (scaleForm.options.some((o) => !o.label.trim())) return ElMessage.warning('选项文字不能为空')
   if (!scaleForm.thresholds.length || scaleForm.thresholds.some((t) => !t.level.trim())) return ElMessage.warning('请至少保留一档结果分档，且等级名称不能为空')
 
@@ -774,6 +796,26 @@ function goAgent(p: any) {
         <div v-if="resultNote" class="result-note">{{ resultNote }}</div>
       </el-alert>
 
+      <details v-if="quiz.result" class="ans-detail">
+        <summary>查看作答与得分明细（共 {{ resultDetail.length }} 题）</summary>
+        <table class="ans-table">
+          <thead>
+            <tr><th class="c-no">题号</th><th>题目</th><th class="c-lb">所选</th><th class="c-sc">得分</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="d in resultDetail" :key="d.no">
+              <td class="c-no">{{ d.no }}</td>
+              <td>{{ d.item }}</td>
+              <td class="c-lb">{{ d.label }}</td>
+              <td class="c-sc">
+                {{ d.score }}
+                <el-tag v-if="d.reversed" size="small" effect="plain" style="margin-left: 4px">反向</el-tag>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </details>
+
       <template #footer>
         <el-button @click="quizDialog = false">关闭</el-button>
         <el-button v-if="!quiz.result" type="primary" :disabled="!quiz.scale || quizProgress < (quiz.scale?.items.length ?? 0)" :loading="submittingQuiz" @click="submitQuiz">
@@ -805,9 +847,9 @@ function goAgent(p: any) {
               <el-input-number v-model="o.score" :min="0" :max="10" size="default" style="width: 110px" />
               <el-button size="small" text type="danger" :disabled="scaleForm.options.length <= 2" @click="scaleForm.options.splice(i, 1)">删除</el-button>
             </div>
-            <el-button size="small" :disabled="scaleForm.options.length >= 6" @click="scaleForm.options.push({ label: '', score: scaleForm.options.length })"><el-icon><Plus /></el-icon>添加选项</el-button>
+            <el-button size="small" :disabled="scaleForm.options.length >= 7" @click="scaleForm.options.push({ label: '', score: scaleForm.options.length })"><el-icon><Plus /></el-icon>添加选项</el-button>
           </div>
-          <div class="dim form-tip">2-6 个选项，分值 0-10 且不能重复</div>
+          <div class="dim form-tip">2-7 个选项，分值 0-10 且不能重复</div>
         </el-form-item>
         <el-form-item label="反向计分题">
           <el-input v-model="scaleForm.reverseText" placeholder="题号，逗号分隔，如 3, 7, 12（留空表示无）" style="width: 360px" />
@@ -1087,6 +1129,52 @@ function goAgent(p: any) {
 .result-note {
   margin-top: 6px;
   white-space: pre-line;
+}
+
+.ans-detail {
+  margin-top: 12px;
+  border: 1px solid #eef0f6;
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.ans-detail summary {
+  cursor: pointer;
+  color: #4f6bed;
+  font-size: 13px;
+  user-select: none;
+}
+
+.ans-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: #4a5268;
+}
+
+.ans-table th,
+.ans-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px dashed #f0f1f6;
+}
+
+.ans-table th {
+  color: #a0a8bd;
+  font-weight: 600;
+}
+
+.ans-table .c-no {
+  width: 44px;
+}
+
+.ans-table .c-lb {
+  width: 110px;
+}
+
+.ans-table .c-sc {
+  width: 90px;
 }
 
 .opt-rows {

@@ -5,6 +5,15 @@ import { get, agentStream, fetchConversations, fetchConversation, deleteConversa
 import { auth } from '@/utils/auth'
 import { renderMarkdown } from '@/utils/markdown'
 
+// 渲染兜底：任何 markdown 异常降级为纯文本（转义后），绝不让流式过程把页面拖白屏
+function mdSafe(s: string): string {
+  try {
+    return renderMarkdown(s)
+  } catch {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  }
+}
+
 interface Msg {
   role: 'user' | 'assistant'
   content: string
@@ -116,6 +125,10 @@ async function send(text?: string) {
   scrollBottom()
   sending.value = true
   let needRefreshList = !convId.value
+  // 流式节流：增量先攒在本地变量，最多每 80ms 刷入响应式一次，
+  // 避免每个 delta 都触发整段 markdown 重渲染（长回复时低端环境/WebView2 吃不消）
+  let pending = ''
+  let flushTimer: number | undefined
   try {
     const res = await agentStream({
       model: model.value,
@@ -127,6 +140,17 @@ async function send(text?: string) {
     const decoder = new TextDecoder()
     let buf = ''
     let event = ''
+    const flush = () => {
+      flushTimer = undefined
+      if (pending) {
+        assistantMsg.content += pending
+        pending = ''
+        scrollBottom()
+      }
+    }
+    const scheduleFlush = () => {
+      if (flushTimer === undefined) flushTimer = window.setTimeout(flush, 80)
+    }
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
@@ -159,18 +183,30 @@ async function send(text?: string) {
               try {
                 const j = JSON.parse(payload)
                 const delta = j.choices?.[0]?.delta?.content
-                if (delta) assistantMsg.content += delta
+                if (delta) {
+                  pending += delta
+                  scheduleFlush()
+                }
               } catch {
                 /* 非 JSON 片段忽略 */
               }
             }
           }
         }
-        scrollBottom()
       }
     }
+    if (flushTimer !== undefined) {
+      window.clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
+    flush()
     if (!assistantMsg.content) assistantMsg.content = '（没有收到回复内容）'
   } catch (e: any) {
+    if (flushTimer !== undefined) {
+      window.clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
+    pending = ''
     assistantMsg.content = `⚠️ ${e.message}`
     ElMessage.error(e.message)
   } finally {
@@ -245,7 +281,7 @@ function usePrompt(p: { psych: boolean; text: string }) {
         <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
           <div class="bubble">
             <div v-if="m.role === 'assistant'" class="text md">
-              <span v-html="renderMarkdown(m.content)"></span><span v-if="sending && i === messages.length - 1" class="caret">▌</span>
+              <span v-html="mdSafe(m.content)"></span><span v-if="sending && i === messages.length - 1" class="caret">▌</span>
             </div>
             <div v-else class="text">{{ m.content }}</div>
             <div v-if="m.sources?.length" class="sources">

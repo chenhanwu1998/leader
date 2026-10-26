@@ -2,11 +2,11 @@
 const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 export function renderMarkdown(src: string): string {
-  // 1) 先抽出代码块，避免内容被其它规则影响
+  // 1) 先抽出代码块，换成不会被任何行内规则误吃的占位符，避免内容被其它规则影响
   const codes: string[] = []
   let s = src.replace(/```[^\n]*\n?([\s\S]*?)```/g, (_m, code: string) => {
     codes.push(code.replace(/\n+$/, ''))
-    return ` ${codes.length - 1} `
+    return `${codes.length - 1}`
   })
 
   s = esc(s)
@@ -41,7 +41,7 @@ export function renderMarkdown(src: string): string {
   s = s.replace(/\n/g, '<br>')
 
   // 6) 还原代码块（转义后输出）
-  s = s.replace(/ (\d+) /g, (_m, i: string) => `<pre class="md-code"><code>${esc(codes[Number(i)])}</code></pre>`)
+  s = s.replace(/(\d+)/g, (_m, i: string) => `<pre class="md-code"><code>${esc(codes[Number(i)] ?? '')}</code></pre>`)
 
   // 7) 块级元素前后的 <br> 清理
   s = s.replace(/<br>(?=<(?:div|ul|ol|pre)\b)/g, '')

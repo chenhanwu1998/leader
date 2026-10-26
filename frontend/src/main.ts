@@ -12,6 +12,10 @@ import './assets/main.css'
 const boot = async () => {
   await resolveApiBase()
   const app = createApp(App)
+  // 全局护栏：任何组件渲染/运行时异常只记日志，不允许把整页拖成白屏
+  app.config.errorHandler = (err, _instance, info) => {
+    console.error('[app-error]', err, info)
+  }
   app.use(router)
   app.use(ElementPlus, { locale: zhCn })
   for (const [name, comp] of Object.entries(IconsVue)) {
