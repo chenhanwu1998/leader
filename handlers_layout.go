@@ -9,7 +9,7 @@ func registerLayoutRoutes(mux *http.ServeMux) {
 	// ---------- 座位表 ----------
 	mux.HandleFunc("GET /api/seats/{className}", func(w http.ResponseWriter, r *http.Request) {
 		className := r.PathValue("className")
-		row := queryOne(`SELECT * FROM seat_layouts WHERE class_name = ?`, className)
+		row := queryOne(ledgerDB(r), `SELECT * FROM seat_layouts WHERE class_name = ?`, className)
 		if row == nil {
 			writeJSON(w, 200, map[string]any{"class_name": className, "rows": 5, "cols": 8, "group_size": 2, "assignments": []any{}, "colors": map[string]any{}})
 			return
@@ -53,7 +53,7 @@ func registerLayoutRoutes(mux *http.ServeMux) {
 		if len(colors) == 0 || string(colors) == "null" {
 			colors = json.RawMessage("{}")
 		}
-		_, err = db.Exec(`
+		_, err = ledgerDB(r).Exec(`
 			INSERT INTO seat_layouts(class_name, rows, cols, group_size, assignments, colors, updated_at)
 			VALUES (?,?,?,?,?,?, datetime('now','localtime'))
 			ON CONFLICT(class_name) DO UPDATE SET rows=excluded.rows, cols=excluded.cols, group_size=excluded.group_size, assignments=excluded.assignments, colors=excluded.colors, updated_at=excluded.updated_at
@@ -68,7 +68,7 @@ func registerLayoutRoutes(mux *http.ServeMux) {
 	// ---------- 课程表 ----------
 	mux.HandleFunc("GET /api/schedule/{className}", func(w http.ResponseWriter, r *http.Request) {
 		className := r.PathValue("className")
-		row := queryOne(`SELECT config FROM schedules WHERE class_name = ?`, className)
+		row := queryOne(ledgerDB(r), `SELECT config FROM schedules WHERE class_name = ?`, className)
 		var conf any
 		if row != nil {
 			c := toStr(row["config"])
@@ -95,7 +95,7 @@ func registerLayoutRoutes(mux *http.ServeMux) {
 		if len(conf) == 0 || string(conf) == "null" {
 			conf = json.RawMessage("{}")
 		}
-		_, err = db.Exec(`
+		_, err = ledgerDB(r).Exec(`
 			INSERT INTO schedules(class_name, config, updated_at) VALUES (?,?, datetime('now','localtime'))
 			ON CONFLICT(class_name) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at
 		`, r.PathValue("className"), string(conf))

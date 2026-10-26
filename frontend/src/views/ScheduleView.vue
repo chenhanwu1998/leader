@@ -386,7 +386,7 @@ onMounted(async () => {
 }
 
 .break-row td {
-  background: linear-gradient(90deg, transparent, #eef0f7 20%, #eef0f7 80%, transparent);
+  background: linear-gradient(to right, transparent, #eef0f7 20%, #eef0f7 80%, transparent);
   color: #aab1c5;
   text-align: center;
   font-size: 12px;

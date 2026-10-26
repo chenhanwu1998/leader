@@ -10,12 +10,19 @@ export interface RowData {
  * 浏览器开发环境下此链路同样可用。
  */
 async function saveViaServer(bytes: ArrayBuffer, filename: string) {
+  const token = localStorage.getItem('ledger_token') || ''
   const res = await fetch(`/api/export/save?name=${encodeURIComponent(filename)}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
+    headers: { 'Content-Type': 'application/octet-stream', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: bytes,
   })
   const data = await res.json().catch(() => null)
+  if (res.status === 401) {
+    localStorage.removeItem('ledger_token')
+    localStorage.removeItem('ledger_user')
+    location.href = '/login'
+    throw new Error('登录已过期')
+  }
   if (!res.ok || !data?.url) throw new Error(data?.message || '导出失败')
   const a = document.createElement('a')
   a.href = data.url

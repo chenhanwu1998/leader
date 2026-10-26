@@ -4,15 +4,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
-var db *sql.DB
-var dbPath string
+// 每个账号一个独立的台账库（data/users/<账号>.db），按登录会话路由
+var baseDataDir string
+var ledgerMu sync.Mutex
+var ledgerPool = map[string]*sql.DB{}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS classes (
@@ -135,6 +139,46 @@ CREATE TABLE IF NOT EXISTS class_subjects (
   teacher TEXT DEFAULT '',
   PRIMARY KEY (class_name, name)
 );
+
+-- 心理健康：重点关注学生档案
+CREATE TABLE IF NOT EXISTS psy_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_name TEXT NOT NULL,
+  class_name TEXT DEFAULT '',
+  gender TEXT DEFAULT '',
+  risk_level TEXT DEFAULT '常规关注',
+  tags TEXT DEFAULT '',
+  note TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_psy_profiles_class ON psy_profiles(class_name);
+
+-- 心理辅导 / 谈话记录
+CREATE TABLE IF NOT EXISTS psy_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profile_id INTEGER NOT NULL REFERENCES psy_profiles(id) ON DELETE CASCADE,
+  session_date TEXT DEFAULT '',
+  mode TEXT DEFAULT '面谈',
+  topic TEXT DEFAULT '',
+  content TEXT DEFAULT '',
+  next_follow TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_psy_sessions_profile ON psy_sessions(profile_id);
+
+-- 量表测评结果
+CREATE TABLE IF NOT EXISTS psy_assessments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profile_id INTEGER NOT NULL REFERENCES psy_profiles(id) ON DELETE CASCADE,
+  scale TEXT NOT NULL,
+  answers TEXT DEFAULT '[]',
+  score REAL DEFAULT 0,
+  level TEXT DEFAULT '',
+  flagged INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_psy_assessments_profile ON psy_assessments(profile_id);
 `
 
 // dbDir 数据目录：优先 exe 同级 data/，不可写时退回 %APPDATA%\teacher-ledger\data
@@ -160,53 +204,97 @@ func dbDir() string {
 	return dir
 }
 
-func openDB(dir string) error {
-	dbPath = filepath.Join(dir, "teacher-ledger.db")
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", filepath.ToSlash(dbPath))
-	var err error
-	db, err = sql.Open("sqlite", dsn)
+func ledgerFile(username string) string {
+	return filepath.Join(baseDataDir, "users", username+".db")
+}
+
+func openLedgerDB(file string) (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return nil, err
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", filepath.ToSlash(file))
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// SQLite 单写者：限制为一个连接，避免 database/sql 连接池下的 table lock 竞争
 	db.SetMaxOpenConns(1)
 	if _, err = db.Exec(schema); err != nil {
-		return err
+		db.Close()
+		return nil, err
 	}
+	if err := migrateSeatColors(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	migratePeriods(db)
+	migrateDutyCells(db)
+	return db, nil
+}
 
-	// 旧库迁移：seat_layouts 增加颜色列
+// ledgerFor 打开（或复用）某账号的台账库
+func ledgerFor(username string) (*sql.DB, error) {
+	ledgerMu.Lock()
+	defer ledgerMu.Unlock()
+	if d, ok := ledgerPool[username]; ok {
+		return d, nil
+	}
+	d, err := openLedgerDB(ledgerFile(username))
+	if err != nil {
+		return nil, err
+	}
+	ledgerPool[username] = d
+	return d, nil
+}
+
+// closeLedger 关闭并移出连接池（删除账号数据文件前必须先释放句柄，Windows 下文件才被解锁）
+func closeLedger(username string) {
+	ledgerMu.Lock()
+	defer ledgerMu.Unlock()
+	if d, ok := ledgerPool[username]; ok {
+		d.Close()
+		delete(ledgerPool, username)
+	}
+}
+
+// ledgerDB 按请求会话解析到对应账号的台账库；异常时回退到默认账号
+func ledgerDB(r *http.Request) *sql.DB {
+	if u := currentUser(r); u != nil {
+		if d, err := ledgerFor(u.Username); err == nil {
+			return d
+		}
+	}
+	d, _ := ledgerFor(bootUser)
+	return d
+}
+
+// 旧库迁移：seat_layouts 增加颜色列
+func migrateSeatColors(db *sql.DB) error {
 	var hasColors bool
 	rows, err := db.Query(`PRAGMA table_info(seat_layouts)`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var cid int
 		var name, ctype string
 		var notnull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
 			return err
 		}
 		if name == "colors" {
 			hasColors = true
 		}
 	}
+	rows.Close()
 	if !hasColors {
 		if _, err := db.Exec(`ALTER TABLE seat_layouts ADD COLUMN colors TEXT DEFAULT '{}'`); err != nil {
 			return err
 		}
 	}
-	migratePeriods()
-	migrateDutyCells()
 	return nil
-}
-
-func closeDB() {
-	if db != nil {
-		db.Close()
-	}
 }
 
 // ---------- 查询辅助 ----------
@@ -220,7 +308,7 @@ func normalizeRow(row map[string]any) map[string]any {
 	return row
 }
 
-func queryAll(q string, args ...any) ([]map[string]any, error) {
+func queryAll(db *sql.DB, q string, args ...any) ([]map[string]any, error) {
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -249,16 +337,16 @@ func queryAll(q string, args ...any) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
-func queryOne(q string, args ...any) map[string]any {
-	rows, err := queryAll(q, args...)
+func queryOne(db *sql.DB, q string, args ...any) map[string]any {
+	rows, err := queryAll(db, q, args...)
 	if err != nil || len(rows) == 0 {
 		return nil
 	}
 	return rows[0]
 }
 
-func queryCount(q string, args ...any) int64 {
-	row := queryOne(q, args...)
+func queryCount(db *sql.DB, q string, args ...any) int64 {
+	row := queryOne(db, q, args...)
 	if row == nil {
 		return 0
 	}
@@ -310,15 +398,15 @@ func toStr(v any) string {
 
 // ---------- 设置 ----------
 
-func getSetting(key, fallback string) string {
-	row := queryOne(`SELECT value FROM settings WHERE key = ?`, key)
+func getSetting(db *sql.DB, key, fallback string) string {
+	row := queryOne(db, `SELECT value FROM settings WHERE key = ?`, key)
 	if row == nil {
 		return fallback
 	}
 	return toStr(row["value"])
 }
 
-func setSetting(key, value string) {
+func setSetting(db *sql.DB, key, value string) {
 	db.Exec(`INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 }
 
@@ -380,8 +468,8 @@ func normalizeSubjects(raw json.RawMessage) []Subject {
 	return out
 }
 
-func getSubjects() []Subject {
-	v := getSetting("subjects", "")
+func getSubjects(db *sql.DB) []Subject {
+	v := getSetting(db, "subjects", "")
 	if v != "" {
 		if list := normalizeSubjects(json.RawMessage(v)); len(list) > 0 {
 			return list
@@ -418,18 +506,18 @@ func withDutyEntries(list []Subject) []Subject {
 }
 
 // 班级专属课程：有配置按班级的，没有则回退全局科目表
-func getClassSubjects(className string) []Subject {
-	rows, err := queryAll(`SELECT name, color, teacher FROM class_subjects WHERE class_name = ? ORDER BY rowid`, className)
+func getClassSubjects(db *sql.DB, className string) []Subject {
+	rows, err := queryAll(db, `SELECT name, color, teacher FROM class_subjects WHERE class_name = ? ORDER BY rowid`, className)
 	if err == nil && len(rows) > 0 {
 		raw, _ := json.Marshal(rows)
 		if list := normalizeSubjects(raw); len(list) > 0 {
 			return withDutyEntries(list)
 		}
 	}
-	return withDutyEntries(getSubjects())
+	return withDutyEntries(getSubjects(db))
 }
 
-func setClassSubjects(className string, raw json.RawMessage) []Subject {
+func setClassSubjects(db *sql.DB, className string, raw json.RawMessage) []Subject {
 	list := normalizeSubjects(raw)
 	tx, err := db.Begin()
 	if err == nil {
@@ -443,11 +531,11 @@ func setClassSubjects(className string, raw json.RawMessage) []Subject {
 }
 
 // 一次性迁移：给已有课程表补上「早读」（插到最前，格子索引整体后移）和两节「晚修」（追加到末尾）
-func migratePeriods() {
-	if getSetting("mig_periods_v1", "") == "1" {
+func migratePeriods(db *sql.DB) {
+	if getSetting(db, "mig_periods_v1", "") == "1" {
 		return
 	}
-	rows, err := queryAll(`SELECT class_name, config FROM schedules`)
+	rows, err := queryAll(db, `SELECT class_name, config FROM schedules`)
 	if err == nil {
 		touched := 0
 		for _, row := range rows {
@@ -531,15 +619,15 @@ func migratePeriods() {
 			fmt.Printf("课程表迁移：%d 个班级已补上早读/晚修节次\n", touched)
 		}
 	}
-	setSetting("mig_periods_v1", "1")
+	setSetting(db, "mig_periods_v1", "1")
 }
 
 // 一次性迁移：把课表里「早读 / 晚修」行的空格填满（早读轮排语文/英语，晚修排自习），值班教师在课程设置里维护
-func migrateDutyCells() {
-	if getSetting("mig_duty_cells_v1", "") == "1" {
+func migrateDutyCells(db *sql.DB) {
+	if getSetting(db, "mig_duty_cells_v1", "") == "1" {
 		return
 	}
-	rows, err := queryAll(`SELECT class_name, config FROM schedules`)
+	rows, err := queryAll(db, `SELECT class_name, config FROM schedules`)
 	if err == nil {
 		touched := 0
 		for _, row := range rows {
@@ -597,5 +685,5 @@ func migrateDutyCells() {
 			fmt.Printf("课表填充：%d 个班级的早读/晚修已排好\n", touched)
 		}
 	}
-	setSetting("mig_duty_cells_v1", "1")
+	setSetting(db, "mig_duty_cells_v1", "1")
 }

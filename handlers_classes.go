@@ -11,7 +11,7 @@ var classFields = []string{"name", "grade", "head_teacher", "classroom", "remark
 
 func registerClassRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/classes", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := queryAll(`
+		rows, err := queryAll(ledgerDB(r), `
 			SELECT c.*, (SELECT COUNT(*) FROM students s WHERE s.class_name = c.name AND s.status = '在读') AS student_count
 			FROM classes c ORDER BY c.grade, c.name`)
 		if err != nil {
@@ -23,7 +23,7 @@ func registerClassRoutes(mux *http.ServeMux) {
 
 	// 班级名下拉（班级表 ∪ 学生表中出现过的班级，兜底旧数据）
 	mux.HandleFunc("GET /api/classes/names", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := queryAll(`
+		rows, err := queryAll(ledgerDB(r), `
 			SELECT name FROM classes
 			UNION
 			SELECT DISTINCT class_name AS name FROM students WHERE class_name != ''
@@ -41,7 +41,7 @@ func registerClassRoutes(mux *http.ServeMux) {
 
 	// 班级专属课程设置（无班级配置时回退全局科目表）
 	mux.HandleFunc("GET /api/classes/{className}/subjects", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, getClassSubjects(r.PathValue("className")))
+		writeJSON(w, 200, getClassSubjects(ledgerDB(r), r.PathValue("className")))
 	})
 
 	mux.HandleFunc("PUT /api/classes/{className}/subjects", func(w http.ResponseWriter, r *http.Request) {
@@ -59,11 +59,11 @@ func registerClassRoutes(mux *http.ServeMux) {
 			fail(w, 400, "至少保留一个科目")
 			return
 		}
-		if tx, err := db.Begin(); err == nil {
+		if tx, err := ledgerDB(r).Begin(); err == nil {
 			ensureClass(tx, className)
 			tx.Commit()
 		}
-		writeJSON(w, 200, setClassSubjects(className, raw))
+		writeJSON(w, 200, setClassSubjects(ledgerDB(r), className, raw))
 	})
 
 	mux.HandleFunc("POST /api/classes", func(w http.ResponseWriter, r *http.Request) {
@@ -77,11 +77,11 @@ func registerClassRoutes(mux *http.ServeMux) {
 			fail(w, 400, "班级名称不能为空")
 			return
 		}
-		if queryOne(`SELECT id FROM classes WHERE name = ?`, name) != nil {
+		if queryOne(ledgerDB(r), `SELECT id FROM classes WHERE name = ?`, name) != nil {
 			fail(w, 400, "班级「"+name+"」已存在")
 			return
 		}
-		res, err := db.Exec(`INSERT INTO classes(name, grade, head_teacher, classroom, remark) VALUES (?,?,?,?,?)`,
+		res, err := ledgerDB(r).Exec(`INSERT INTO classes(name, grade, head_teacher, classroom, remark) VALUES (?,?,?,?,?)`,
 			name, strField(body, "grade", ""), strField(body, "head_teacher", ""), strField(body, "classroom", ""), strField(body, "remark", ""))
 		if err != nil {
 			fail(w, 500, err.Error())
@@ -93,7 +93,7 @@ func registerClassRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("PUT /api/classes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		row := queryOne(`SELECT * FROM classes WHERE id = ?`, id)
+		row := queryOne(ledgerDB(r), `SELECT * FROM classes WHERE id = ?`, id)
 		if row == nil {
 			fail(w, 404, "班级不存在")
 			return
@@ -115,7 +115,7 @@ func registerClassRoutes(mux *http.ServeMux) {
 				fail(w, 400, "班级名称不能为空")
 				return
 			}
-			if queryOne(`SELECT id FROM classes WHERE name = ? AND id != ?`, newName, id) != nil {
+			if queryOne(ledgerDB(r), `SELECT id FROM classes WHERE name = ? AND id != ?`, newName, id) != nil {
 				fail(w, 400, "班级「"+newName+"」已存在")
 				return
 			}
@@ -126,7 +126,7 @@ func registerClassRoutes(mux *http.ServeMux) {
 			return
 		}
 
-		tx, err := db.Begin()
+		tx, err := ledgerDB(r).Begin()
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -172,17 +172,17 @@ func registerClassRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("DELETE /api/classes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		row := queryOne(`SELECT * FROM classes WHERE id = ?`, id)
+		row := queryOne(ledgerDB(r), `SELECT * FROM classes WHERE id = ?`, id)
 		if row == nil {
 			fail(w, 404, "班级不存在")
 			return
 		}
 		name := toStr(row["name"])
-		if cnt := queryCount(`SELECT COUNT(*) c FROM students WHERE class_name = ?`, name); cnt > 0 {
+		if cnt := queryCount(ledgerDB(r), `SELECT COUNT(*) c FROM students WHERE class_name = ?`, name); cnt > 0 {
 			fail(w, 400, "班级「"+name+"」下还有 "+strconv.FormatInt(cnt, 10)+" 名学生，请先将学生调班或删除后再删除班级")
 			return
 		}
-		tx, err := db.Begin()
+		tx, err := ledgerDB(r).Begin()
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -221,9 +221,9 @@ func ensureClass(tx *sql.Tx, name string) {
 	tx.Exec(`INSERT OR IGNORE INTO classes(name) VALUES (?)`, n)
 }
 
-func classExists(name string) bool {
+func classExists(d *sql.DB, name string) bool {
 	if name == "" {
 		return true // 允许不填班级
 	}
-	return queryOne(`SELECT id FROM classes WHERE name = ?`, name) != nil
+	return queryOne(d, `SELECT id FROM classes WHERE name = ?`, name) != nil
 }

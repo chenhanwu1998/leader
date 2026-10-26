@@ -8,7 +8,7 @@ import (
 func registerScoreRoutes(mux *http.ServeMux) {
 	// ---------- 考试 ----------
 	mux.HandleFunc("GET /api/scores/exams", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := queryAll(`SELECT * FROM exams ORDER BY exam_date DESC, id DESC`)
+		rows, err := queryAll(ledgerDB(r), `SELECT * FROM exams ORDER BY exam_date DESC, id DESC`)
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -27,7 +27,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 			fail(w, 400, "考试名称不能为空")
 			return
 		}
-		res, err := db.Exec(`INSERT INTO exams(name, exam_date, term, type, class_name, remark) VALUES (?,?,?,?,?,?)`,
+		res, err := ledgerDB(r).Exec(`INSERT INTO exams(name, exam_date, term, type, class_name, remark) VALUES (?,?,?,?,?,?)`,
 			name, strField(body, "exam_date", ""), strField(body, "term", ""), strField(body, "type", "期中"),
 			strField(body, "class_name", ""), strField(body, "remark", ""))
 		if err != nil {
@@ -44,7 +44,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 			fail(w, 400, "请求格式错误")
 			return
 		}
-		if _, err := db.Exec(`UPDATE exams SET name=?, exam_date=?, term=?, type=?, class_name=?, remark=? WHERE id=?`,
+		if _, err := ledgerDB(r).Exec(`UPDATE exams SET name=?, exam_date=?, term=?, type=?, class_name=?, remark=? WHERE id=?`,
 			strField(body, "name", ""), strField(body, "exam_date", ""), strField(body, "term", ""), strField(body, "type", "期中"),
 			strField(body, "class_name", ""), strField(body, "remark", ""), r.PathValue("id")); err != nil {
 			fail(w, 500, err.Error())
@@ -54,7 +54,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("DELETE /api/scores/exams/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := db.Exec(`DELETE FROM exams WHERE id = ?`, r.PathValue("id")); err != nil {
+		if _, err := ledgerDB(r).Exec(`DELETE FROM exams WHERE id = ?`, r.PathValue("id")); err != nil {
 			fail(w, 500, err.Error())
 			return
 		}
@@ -68,7 +68,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 			writeJSON(w, 200, []any{})
 			return
 		}
-		rows, err := queryAll(`
+		rows, err := queryAll(ledgerDB(r), `
 			SELECT s.id, s.exam_id, s.student_id, s.subject, s.score, s.full_score,
 			       st.name AS student_name, st.student_no, st.class_name
 			FROM scores s JOIN students st ON st.id = s.student_id
@@ -89,7 +89,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 			writeJSON(w, 200, map[string]any{"subjects": []any{}, "rows": []any{}})
 			return
 		}
-		subRows, err := queryAll(`SELECT DISTINCT subject FROM scores WHERE exam_id = ? ORDER BY id`, examID)
+		subRows, err := queryAll(ledgerDB(r), `SELECT DISTINCT subject FROM scores WHERE exam_id = ? ORDER BY id`, examID)
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -98,7 +98,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 		for _, row := range subRows {
 			subjects = append(subjects, toStr(row["subject"]))
 		}
-		rows, err := queryAll(`
+		rows, err := queryAll(ledgerDB(r), `
 			SELECT s.student_id, st.name, st.student_no, st.class_name, s.subject, s.score
 			FROM scores s JOIN students st ON st.id = s.student_id
 			WHERE s.exam_id = ?
@@ -165,7 +165,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 			fail(w, 400, "参数错误")
 			return
 		}
-		tx, err := db.Begin()
+		tx, err := ledgerDB(r).Begin()
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -209,7 +209,7 @@ func registerScoreRoutes(mux *http.ServeMux) {
 
 	// 删除某学生某场考试的全部成绩
 	mux.HandleFunc("DELETE /api/scores/entry/{examId}/{studentId}", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := db.Exec(`DELETE FROM scores WHERE exam_id = ? AND student_id = ?`, r.PathValue("examId"), r.PathValue("studentId")); err != nil {
+		if _, err := ledgerDB(r).Exec(`DELETE FROM scores WHERE exam_id = ? AND student_id = ?`, r.PathValue("examId"), r.PathValue("studentId")); err != nil {
 			fail(w, 500, err.Error())
 			return
 		}

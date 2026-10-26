@@ -176,7 +176,7 @@ type seededStudent struct {
 }
 
 func clearAllTables(tx *sql.Tx) error {
-	for _, t := range []string{"scores", "leaves", "rewards", "contacts", "exams", "students", "classes", "seat_layouts", "schedules", "class_subjects"} {
+	for _, t := range []string{"scores", "leaves", "rewards", "contacts", "exams", "students", "classes", "seat_layouts", "schedules", "class_subjects", "psy_sessions", "psy_assessments", "psy_profiles"} {
 		if _, err := tx.Exec("DELETE FROM " + t); err != nil {
 			return err
 		}
@@ -185,15 +185,15 @@ func clearAllTables(tx *sql.Tx) error {
 }
 
 // seedDemo 灌入演示数据：高一 3 个班（每班 50+ 人）、九科成绩、请假/奖惩/家校、座位表、课程表
-func seedDemo(force bool) error {
+func seedDemo(d *sql.DB, force bool) error {
 	if !force {
-		if c := queryCount(`SELECT COUNT(*) c FROM students`); c > 0 {
+		if c := queryCount(d, `SELECT COUNT(*) c FROM students`); c > 0 {
 			return fmt.Errorf("数据库已有 %d 名学生，未做改动", c)
 		}
 	}
 	r := newRng(20261023)
 
-	tx, err := db.Begin()
+	tx, err := d.Begin()
 	if err != nil {
 		return err
 	}
@@ -373,18 +373,18 @@ func seedDemo(force bool) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	setSetting("seeded", "1")
+	setSetting(d, "seeded", "1")
 	log.Printf("演示数据：%d 个班级 / %d 名学生 / %d 场考试 %d 条成绩", len(seedClasses), studentCount, len(seedExams), scoreCount)
 	return nil
 }
 
 // maybeSeed 首次启动（settings 无 seeded 标记）时自动灌入演示数据
-func maybeSeed() {
-	if getSetting("seeded", "") != "" {
+func maybeSeed(d *sql.DB) {
+	if getSetting(d, "seeded", "") != "" {
 		return
 	}
-	if err := seedDemo(false); err != nil {
+	if err := seedDemo(d, false); err != nil {
 		log.Printf("演示数据灌入跳过：%v", err)
-		setSetting("seeded", "1")
+		setSetting(d, "seeded", "1")
 	}
 }

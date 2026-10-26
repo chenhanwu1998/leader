@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchClasses, fetchClassSubjects, saveClassSubjects, get, post, put, type SubjectInfo } from '@/api'
+import { fetchClasses, fetchClassSubjects, saveClassSubjects, get, post, put, authDownload, type SubjectInfo } from '@/api'
 
 const teacher = ref('')
 const term = ref('')
@@ -52,8 +52,29 @@ async function saveSubjects() {
   ElMessage.success(`「${subjectClass.value}」课程设置已保存，课程表即时生效`)
 }
 
-function backup() {
-  window.open('/api/backup', '_blank')
+async function backup() {
+  try {
+    const res = await authDownload('/api/backup')
+    const bytes = await res.arrayBuffer()
+    const name = `teacher-ledger-backup-${new Date().toISOString().slice(0, 10)}.db`
+    // WebView2 内 blob <a download> 无法触发系统下载，走后端一次性下载链接
+    const token = localStorage.getItem('ledger_token') || ''
+    const save = await fetch(`/api/export/save?name=${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${token}` },
+      body: bytes,
+    })
+    const data = await save.json().catch(() => null)
+    if (!save.ok || !data?.url) throw new Error(data?.message || '导出失败')
+    const a = document.createElement('a')
+    a.href = data.url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } catch (e: any) {
+    ElMessage.error(e.message || '备份下载失败')
+  }
 }
 
 async function resetAll() {

@@ -445,13 +445,15 @@ onMounted(async () => {
 }
 
 .classroom {
-  background: linear-gradient(180deg, #fbfcff, #f7f9fe);
+  background: #fbfcff;
+  background: linear-gradient(to bottom, #fbfcff, #f7f9fe);
 }
 
 .blackboard {
   width: 62%;
   margin: 0 auto 10px;
-  background: linear-gradient(180deg, #36544e, #2c4742);
+  background: #36544e;
+  background: linear-gradient(to bottom, #36544e, #2c4742);
   color: #cfe3dd;
   border-radius: 6px;
   height: 34px;
@@ -472,7 +474,8 @@ onMounted(async () => {
 .podium {
   width: 220px;
   height: 54px;
-  background: linear-gradient(180deg, #e8edf7, #d7deee);
+  background: #e8edf7;
+  background: linear-gradient(to bottom, #e8edf7, #d7deee);
   clip-path: polygon(6% 0, 94% 0, 100% 100%, 0 100%);
   display: flex;
   align-items: center;

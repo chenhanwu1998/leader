@@ -44,7 +44,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 			params = append(params, "%"+v+"%", "%"+v+"%")
 		}
 		sqlStr += " ORDER BY class_name, CAST(student_no AS INTEGER), student_no, name"
-		rows, err := queryAll(sqlStr, params...)
+		rows, err := queryAll(ledgerDB(r), sqlStr, params...)
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -53,7 +53,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("GET /api/students/classes", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := queryAll(`SELECT DISTINCT class_name AS c FROM students WHERE class_name != '' ORDER BY c`)
+		rows, err := queryAll(ledgerDB(r), `SELECT DISTINCT class_name AS c FROM students WHERE class_name != '' ORDER BY c`)
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -78,7 +78,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 		}
 		className := strings.TrimSpace(toStr(data["class_name"]))
 		data["class_name"] = className
-		if className != "" && !classExists(className) {
+		if className != "" && !classExists(ledgerDB(r), className) {
 			fail(w, 400, "班级「"+className+"」不存在，请先在「班级管理」中创建或使用批量导入")
 			return
 		}
@@ -90,7 +90,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 				args = append(args, v)
 			}
 		}
-		res, err := db.Exec(`INSERT INTO students(`+strings.Join(keys, ",")+`) VALUES(`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)`, args...)
+		res, err := ledgerDB(r).Exec(`INSERT INTO students(`+strings.Join(keys, ",")+`) VALUES(`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)`, args...)
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -112,7 +112,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 		}
 		ok, failCnt := 0, 0
 		errs := []string{}
-		tx, err := db.Begin()
+		tx, err := ledgerDB(r).Begin()
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -170,7 +170,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 		if _, ok := data["class_name"]; ok {
 			className := strings.TrimSpace(toStr(data["class_name"]))
 			data["class_name"] = className
-			if className != "" && !classExists(className) {
+			if className != "" && !classExists(ledgerDB(r), className) {
 				fail(w, 400, "班级「"+className+"」不存在，请先在「班级管理」中创建")
 				return
 			}
@@ -188,7 +188,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 			}
 		}
 		args = append(args, r.PathValue("id"))
-		if _, err := db.Exec(`UPDATE students SET `+strings.Join(sets, ",")+`, updated_at = datetime('now','localtime') WHERE id = ?`, args...); err != nil {
+		if _, err := ledgerDB(r).Exec(`UPDATE students SET `+strings.Join(sets, ",")+`, updated_at = datetime('now','localtime') WHERE id = ?`, args...); err != nil {
 			fail(w, 500, err.Error())
 			return
 		}
@@ -196,7 +196,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("DELETE /api/students/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := db.Exec(`DELETE FROM students WHERE id = ?`, r.PathValue("id")); err != nil {
+		if _, err := ledgerDB(r).Exec(`DELETE FROM students WHERE id = ?`, r.PathValue("id")); err != nil {
 			fail(w, 500, err.Error())
 			return
 		}
@@ -210,7 +210,7 @@ func registerStudentRoutes(mux *http.ServeMux) {
 			return
 		}
 		ids, _ := body["ids"].([]any)
-		tx, err := db.Begin()
+		tx, err := ledgerDB(r).Begin()
 		if err != nil {
 			fail(w, 500, err.Error())
 			return

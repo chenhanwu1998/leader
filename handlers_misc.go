@@ -20,7 +20,7 @@ func registerMiscRoutes(mux *http.ServeMux) {
 
 	// 全局设置（科目列表等）
 	mux.HandleFunc("GET /api/settings/subjects", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, getSubjects())
+		writeJSON(w, 200, getSubjects(ledgerDB(r)))
 	})
 	mux.HandleFunc("PUT /api/settings/subjects", func(w http.ResponseWriter, r *http.Request) {
 		raw, err := decodeBodyRaw(r)
@@ -34,12 +34,12 @@ func registerMiscRoutes(mux *http.ServeMux) {
 		}
 		list := normalizeSubjects(arr)
 		out, _ := json.Marshal(list)
-		setSetting("subjects", string(out))
+		setSetting(ledgerDB(r), "subjects", string(out))
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("GET /api/settings/{key}", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"value": getSetting(r.PathValue("key"), "")})
+		writeJSON(w, 200, map[string]any{"value": getSetting(ledgerDB(r), r.PathValue("key"), "")})
 	})
 	mux.HandleFunc("PUT /api/settings/{key}", func(w http.ResponseWriter, r *http.Request) {
 		body, err := decodeBody(r)
@@ -47,19 +47,23 @@ func registerMiscRoutes(mux *http.ServeMux) {
 			fail(w, 400, "请求格式错误")
 			return
 		}
-		setSetting(r.PathValue("key"), strField(body, "value", ""))
+		setSetting(ledgerDB(r), r.PathValue("key"), strField(body, "value", ""))
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})
 
-	// 数据备份：先合并 WAL 再下载 db 文件
+	// 数据备份：先合并 WAL 再下载当前账号的 db 文件
 	mux.HandleFunc("GET /api/backup", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := db.Query(`PRAGMA wal_checkpoint(TRUNCATE)`)
+		rows, err := ledgerDB(r).Query(`PRAGMA wal_checkpoint(TRUNCATE)`)
 		if err == nil {
 			rows.Close()
 		}
+		username := bootUser
+		if u := currentUser(r); u != nil {
+			username = u.Username
+		}
 		name := "teacher-ledger-backup-" + time.Now().Format("2006-01-02") + ".db"
 		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"; filename*=UTF-8''`+url.PathEscape(name))
-		http.ServeFile(w, r, filepath.Clean(dbPath))
+		http.ServeFile(w, r, filepath.Clean(ledgerFile(username)))
 	})
 
 	// 清空全部业务数据（保留设置）
@@ -69,7 +73,7 @@ func registerMiscRoutes(mux *http.ServeMux) {
 			fail(w, 400, "请输入「确认清空」")
 			return
 		}
-		tx, err := db.Begin()
+		tx, err := ledgerDB(r).Begin()
 		if err != nil {
 			fail(w, 500, err.Error())
 			return

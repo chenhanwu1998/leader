@@ -69,7 +69,7 @@ func registerRecordRoutes(mux *http.ServeMux, prefix string, c recordConf) {
 			order = "t.id DESC"
 		}
 		sqlStr += " ORDER BY " + order
-		rows, err := queryAll(sqlStr, params...)
+		rows, err := queryAll(ledgerDB(r), sqlStr, params...)
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -97,7 +97,7 @@ func registerRecordRoutes(mux *http.ServeMux, prefix string, c recordConf) {
 				args = append(args, v)
 			}
 		}
-		res, err := db.Exec(`INSERT INTO `+c.table+`(`+strings.Join(keys, ",")+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)`, args...)
+		res, err := ledgerDB(r).Exec(`INSERT INTO `+c.table+`(`+strings.Join(keys, ",")+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)`, args...)
 		if err != nil {
 			fail(w, 500, err.Error())
 			return
@@ -136,7 +136,7 @@ func registerRecordRoutes(mux *http.ServeMux, prefix string, c recordConf) {
 			sets[i] = k + " = ?"
 		}
 		args = append(args, r.PathValue("id"))
-		if _, err := db.Exec(`UPDATE `+c.table+` SET `+strings.Join(sets, ",")+` WHERE id = ?`, args...); err != nil {
+		if _, err := ledgerDB(r).Exec(`UPDATE `+c.table+` SET `+strings.Join(sets, ",")+` WHERE id = ?`, args...); err != nil {
 			fail(w, 500, err.Error())
 			return
 		}
@@ -144,7 +144,7 @@ func registerRecordRoutes(mux *http.ServeMux, prefix string, c recordConf) {
 	})
 
 	mux.HandleFunc("DELETE "+prefix+"/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := db.Exec(`DELETE FROM `+c.table+` WHERE id = ?`, r.PathValue("id")); err != nil {
+		if _, err := ledgerDB(r).Exec(`DELETE FROM `+c.table+` WHERE id = ?`, r.PathValue("id")); err != nil {
 			fail(w, 500, err.Error())
 			return
 		}
@@ -160,7 +160,7 @@ func registerRecordRoutes(mux *http.ServeMux, prefix string, c recordConf) {
 		list, _ := body["records"].([]any)
 		okCnt, failCnt := 0, 0
 		errs := []string{}
-		tx, err := db.Begin()
+		tx, err := ledgerDB(r).Begin()
 		if err != nil {
 			fail(w, 500, err.Error())
 			return

@@ -21,18 +21,22 @@ var distFS embed.FS
 func apiMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	registerMiscRoutes(mux)
+	registerAuthRoutes(mux)
+	registerAdminRoutes(mux)
 	registerClassRoutes(mux)
 	registerStudentRoutes(mux)
 	registerScoreRoutes(mux)
 	registerAllRecordRoutes(mux)
 	registerLayoutRoutes(mux)
 	registerStatsRoutes(mux)
+	registerPsyRoutes(mux)
+	registerAgentRoutes(mux)
 	return mux
 }
 
 // rootHandler API + 内嵌前端静态资源（SPA 回退到 index.html）
 func rootHandler() http.Handler {
-	api := apiMux()
+	api := authMiddleware(apiMux())
 	files, _ := fs.Sub(distFS, "web/dist")
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -69,18 +73,26 @@ func main() {
 	} else if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Fatalf("数据目录创建失败: %v", err)
 	}
-	if err := openDB(dir); err != nil {
-		log.Fatalf("数据库打开失败: %v", err)
+	baseDataDir = dir
+
+	if err := initUsersDB(dir); err != nil {
+		log.Fatalf("账号库打开失败: %v", err)
 	}
-	defer closeDB()
+	seedUsers() // 初始化账号（lenhar / admin），迁移旧单库数据
+
+	// 默认账号的台账库（旧的单库数据已归到 lenhar 名下）
+	boot, err := ledgerFor(bootUser)
+	if err != nil {
+		log.Fatalf("台账库打开失败: %v", err)
+	}
 
 	if *reseed {
-		if err := seedDemo(true); err != nil {
+		if err := seedDemo(boot, true); err != nil {
 			log.Fatalf("灌入演示数据失败: %v", err)
 		}
 		log.Println("已重新灌入演示数据")
 	} else if !*noseed {
-		maybeSeed() // 首次启动自动带出演示数据
+		maybeSeed(boot) // 首次启动自动带出演示数据
 	}
 
 	if *serve != "" {
@@ -90,7 +102,7 @@ func main() {
 
 	applyWindowIcon("教师台账系统")
 
-	err := wails.Run(&options.App{
+	err = wails.Run(&options.App{
 		Title:     "教师台账系统",
 		Width:     1366,
 		Height:    860,
