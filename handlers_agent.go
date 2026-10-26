@@ -1,11 +1,13 @@
 package main
 
 // 智能体：代理 aihub 平台（ai-route 部署）的流式聊天，心理模式注入知识库检索结果
+// 对话历史按账号落在各自的台账库（agent_conversations / agent_messages）。
 // 与 leader-sys 的 server/routes/agent.js 一一对应
 
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -93,12 +95,180 @@ func retrieveKb(ctx context.Context, query, key, kbId string) []kbHit {
 	return out
 }
 
+// —— 对话历史存取 ——
+
+type convSource struct {
+	N     int    `json:"n"`
+	Title string `json:"title"`
+}
+
+// createConversation 用首条用户输入生成会话标题
+func createConversation(d *sql.DB, mode, model, firstUserMsg string) int64 {
+	title := strings.TrimSpace(firstUserMsg)
+	r := []rune(title)
+	if len(r) > 30 {
+		title = string(r[:30]) + "…"
+	}
+	if title == "" {
+		title = "新对话"
+	}
+	res, err := d.Exec(`INSERT INTO agent_conversations(title, mode, model) VALUES (?,?,?)`, title, mode, model)
+	if err != nil {
+		return 0
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func conversationExists(d *sql.DB, id int64) bool {
+	return queryOne(d, `SELECT id FROM agent_conversations WHERE id = ?`, id) != nil
+}
+
+func saveAgentMessage(d *sql.DB, convId int64, role, content string, sources []convSource) {
+	src := ""
+	if len(sources) > 0 {
+		if b, err := json.Marshal(sources); err == nil {
+			src = string(b)
+		}
+	}
+	d.Exec(`INSERT INTO agent_messages(conversation_id, role, content, sources) VALUES (?,?,?,?)`, convId, role, content, src)
+	d.Exec(`UPDATE agent_conversations SET updated_at = datetime('now','localtime') WHERE id = ?`, convId)
+}
+
+// sseDeltaCollector 边转发边累计助手回复（解析上游 SSE 的 delta.content）
+type sseDeltaCollector struct {
+	carry   strings.Builder // 未按行切齐的残留
+	content strings.Builder
+}
+
+func (c *sseDeltaCollector) feed(chunk []byte) {
+	c.carry.Write(chunk)
+	s := c.carry.String()
+	for {
+		i := strings.IndexByte(s, '\n')
+		if i < 0 {
+			break
+		}
+		line := strings.TrimRight(s[:i], "\r")
+		s = s[i+1:]
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[5:])
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var j struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &j) == nil && len(j.Choices) > 0 {
+			c.content.WriteString(j.Choices[0].Delta.Content)
+		}
+	}
+	c.carry.Reset()
+	c.carry.WriteString(s)
+}
+
+func (c *sseDeltaCollector) text() string { return c.content.String() }
+
 func registerAgentRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/agent/meta", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{
 			"models": agentModels, "default_model": "kimi-k3",
 			"ready": aihubKey() != "", "knowledge_base": aihubKbID() != "",
 		})
+	})
+
+	// 会话列表（最近更新在前，含最后一条预览）
+	mux.HandleFunc("GET /api/agent/conversations", func(w http.ResponseWriter, r *http.Request) {
+		d := ledgerDB(r)
+		rows, err := queryAll(d, `
+SELECT c.id, c.title, c.mode, c.model, c.created_at, c.updated_at,
+  (SELECT COUNT(*) FROM agent_messages m WHERE m.conversation_id = c.id) AS msg_count,
+  COALESCE((SELECT m.content FROM agent_messages m WHERE m.conversation_id = c.id AND m.role = 'user' ORDER BY m.id DESC LIMIT 1), '') AS preview
+FROM agent_conversations c ORDER BY c.updated_at DESC, c.id DESC`)
+		if err != nil {
+			fail(w, 500, err.Error())
+			return
+		}
+		out := make([]map[string]any, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, normalizeRow(row))
+		}
+		writeJSON(w, 200, out)
+	})
+
+	mux.HandleFunc("POST /api/agent/conversations", func(w http.ResponseWriter, r *http.Request) {
+		d := ledgerDB(r)
+		body, _ := decodeBody(r)
+		mode := strField(body, "mode", "plain")
+		if mode != "psych" {
+			mode = "plain"
+		}
+		res, err := d.Exec(`INSERT INTO agent_conversations(title, mode, model) VALUES ('新对话', ?, ?)`, mode, strField(body, "model", ""))
+		if err != nil {
+			fail(w, 500, err.Error())
+			return
+		}
+		id, _ := res.LastInsertId()
+		writeJSON(w, 200, map[string]any{"id": id, "title": "新对话", "mode": mode})
+	})
+
+	mux.HandleFunc("GET /api/agent/conversations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		d := ledgerDB(r)
+		id := r.PathValue("id")
+		conv := queryOne(d, `SELECT id, title, mode, model, created_at, updated_at FROM agent_conversations WHERE id = ?`, id)
+		if conv == nil {
+			fail(w, 404, "对话不存在")
+			return
+		}
+		msgs, err := queryAll(d, `SELECT id, role, content, sources, created_at FROM agent_messages WHERE conversation_id = ? ORDER BY id`, id)
+		if err != nil {
+			fail(w, 500, err.Error())
+			return
+		}
+		list := make([]map[string]any, 0, len(msgs))
+		for _, m := range msgs {
+			sources := []convSource{}
+			if s := toStr(m["sources"]); s != "" {
+				json.Unmarshal([]byte(s), &sources)
+			}
+			list = append(list, map[string]any{
+				"id": toInt(m["id"]), "role": toStr(m["role"]), "content": toStr(m["content"]),
+				"sources": sources, "created_at": toStr(m["created_at"]),
+			})
+		}
+		out := normalizeRow(conv)
+		out["messages"] = list
+		writeJSON(w, 200, out)
+	})
+
+	mux.HandleFunc("PUT /api/agent/conversations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		d := ledgerDB(r)
+		id := r.PathValue("id")
+		if !conversationExists(d, toInt(id)) {
+			fail(w, 404, "对话不存在")
+			return
+		}
+		body, _ := decodeBody(r)
+		title := strings.TrimSpace(strField(body, "title", ""))
+		rn := []rune(title)
+		if len(rn) == 0 || len(rn) > 40 {
+			fail(w, 400, "标题需为 1-40 字")
+			return
+		}
+		d.Exec(`UPDATE agent_conversations SET title = ? WHERE id = ?`, title, id)
+		writeJSON(w, 200, map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("DELETE /api/agent/conversations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		d := ledgerDB(r)
+		d.Exec(`DELETE FROM agent_conversations WHERE id = ?`, r.PathValue("id")) // 消息外键级联
+		writeJSON(w, 200, map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("POST /api/agent/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -146,15 +316,13 @@ func registerAgentRoutes(mux *http.ServeMux) {
 		}
 
 		psych := body["psych"] == true
+		mode := "plain"
 		system := sysPlain
 		if psych {
+			mode = "psych"
 			system = sysPsych
 		}
-		type source struct {
-			N     int    `json:"n"`
-			Title string `json:"title"`
-		}
-		sources := []source{}
+		sources := []convSource{}
 		if psych {
 			if kbId := aihubKbID(); kbId != "" {
 				hits := retrieveKb(r.Context(), chatMessages[len(chatMessages)-1].Content, key, kbId)
@@ -170,7 +338,7 @@ func registerAgentRoutes(mux *http.ServeMux) {
 						if title == "" {
 							title = fmt.Sprintf("资料%d", i+1)
 						}
-						sources = append(sources, source{N: i + 1, Title: title})
+						sources = append(sources, convSource{N: i + 1, Title: title})
 					}
 					system += "\n\n以下是从校园心理健康知识库检索到的相关资料：\n" + strings.Join(refs, "\n\n")
 				}
@@ -188,6 +356,19 @@ func registerAgentRoutes(mux *http.ServeMux) {
 		if !valid {
 			usedModel = "kimi-k3"
 		}
+
+		// 会话归属：未指定则按首条提问自动建会话；先落库用户消息
+		d := ledgerDB(r)
+		convId := toInt(body["conversation_id"])
+		if convId > 0 && !conversationExists(d, convId) {
+			convId = 0
+		}
+		if convId == 0 {
+			convId = createConversation(d, mode, usedModel, chatMessages[len(chatMessages)-1].Content)
+		}
+		userContent := chatMessages[len(chatMessages)-1].Content
+		saveAgentMessage(d, convId, "user", userContent, nil)
+		d.Exec(`UPDATE agent_conversations SET mode = ?, model = ? WHERE id = ?`, mode, usedModel, convId)
 
 		upBody, _ := json.Marshal(map[string]any{
 			"model":    usedModel,
@@ -217,33 +398,44 @@ func registerAgentRoutes(mux *http.ServeMux) {
 			return
 		}
 
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			fail(w, 500, "当前服务不支持流式响应")
-			return
+		// 桌面模式（Wails 内嵌通道）writer 不一定支持 Flush：能刷就刷（真流式），
+		// 不能刷就缓存到结束一次性给出（回环 HTTP 监听可用时前端会自动走真流式通道）
+		flusher, _ := w.(http.Flusher)
+		flush := func() {
+			if flusher != nil {
+				flusher.Flush()
+			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(200)
+		fmt.Fprintf(w, "event: conversation\ndata: {\"id\":%d}\n\n", convId)
 		if len(sources) > 0 {
 			payload, _ := json.Marshal(sources)
 			fmt.Fprintf(w, "event: sources\ndata: %s\n\n", payload)
-			flusher.Flush()
 		}
-		// 逐块转发上游 SSE（请求被客户端取消时 r.Context 会中断上游读取）
+		flush()
+
+		// 逐块转发上游 SSE，同时累计助手全文用于落库（请求被客户端取消时 r.Context 会中断上游读取）
+		collector := &sseDeltaCollector{}
 		buf := make([]byte, 4096)
 		for {
-			n, err := upstream.Body.Read(buf)
+			n, readErr := upstream.Body.Read(buf)
 			if n > 0 {
+				collector.feed(buf[:n])
 				if _, werr := w.Write(buf[:n]); werr != nil {
-					return
+					break
 				}
-				flusher.Flush()
+				flush()
 			}
-			if err != nil {
-				return
+			if readErr != nil {
+				break
 			}
+		}
+		// 中途断开也保留已生成的部分内容
+		if text := collector.text(); text != "" {
+			saveAgentMessage(d, convId, "assistant", text, sources)
 		}
 	})
 }

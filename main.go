@@ -3,10 +3,13 @@ package main
 import (
 	"embed"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/wailsapp/wails/v2"
@@ -35,11 +38,21 @@ func apiMux() *http.ServeMux {
 }
 
 // rootHandler API + 内嵌前端静态资源（SPA 回退到 index.html）
+// 桌面模式前端会探测回环 HTTP 端口直连 API（跨源），这里为 /api 放开 CORS
 func rootHandler() http.Handler {
 	api := authMiddleware(apiMux())
 	files, _ := fs.Sub(distFS, "web/dist")
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if r.Header.Get("Origin") != "" {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				if r.Method == http.MethodOptions {
+					w.WriteHeader(204)
+					return
+				}
+			}
 			api.ServeHTTP(w, r)
 			return
 		}
@@ -58,6 +71,23 @@ func rootHandler() http.Handler {
 		http.FileServer(http.FS(files)).ServeHTTP(w, r2)
 	})
 	return wrapErr(handler)
+}
+
+// 桌面模式下的回环 API：18520 起连续探测 10 个端口，绑定成功的端口由前端探测发现
+func startLoopbackAPI() {
+	for port := 18520; port < 18530; port++ {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		log.Printf("本机回环 API: http://127.0.0.1:%d", port)
+		_ = os.WriteFile(filepath.Join(baseDataDir, "loopback.port"), []byte(fmt.Sprint(port)), 0o644)
+		if err := http.Serve(ln, rootHandler()); err != nil {
+			log.Printf("回环 API 退出: %v", err)
+		}
+		return
+	}
+	log.Println("回环端口均被占用，桌面内将使用内置通道（流式回复降级为整段返回）")
 }
 
 func main() {
@@ -94,11 +124,17 @@ func main() {
 	} else if !*noseed {
 		maybeSeed(boot) // 首次启动自动带出演示数据
 	}
+	maybeSeedPsy(boot) // 心理板块演示数据（只做一次）
 
 	if *serve != "" {
 		log.Printf("教师台账系统（服务模式）: http://localhost%s", *serve)
 		log.Fatal(http.ListenAndServe(*serve, rootHandler()))
 	}
+
+	// 桌面模式：Wails 内嵌通道不支持 SSE flush，另起本机回环监听承载 API，
+	// 前端启动时探测该端口直连（真流式、下载、导出都走这里）。找不到端口时
+	// 前端退回同源通道（回复改为整段返回，功能不失效）。
+	go startLoopbackAPI()
 
 	applyWindowIcon("教师台账系统")
 

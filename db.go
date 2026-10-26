@@ -179,6 +179,26 @@ CREATE TABLE IF NOT EXISTS psy_assessments (
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_psy_assessments_profile ON psy_assessments(profile_id);
+
+-- 智能体对话历史
+CREATE TABLE IF NOT EXISTS agent_conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL DEFAULT '新对话',
+  mode TEXT NOT NULL DEFAULT 'plain',
+  model TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES agent_conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT DEFAULT '',
+  sources TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_conv ON agent_messages(conversation_id);
 `
 
 // dbDir 数据目录：优先 exe 同级 data/，不可写时退回 %APPDATA%\teacher-ledger\data

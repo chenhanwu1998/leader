@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchClasses, fetchClassSubjects, saveClassSubjects, get, post, put, authDownload, type SubjectInfo } from '@/api'
+import { fetchClasses, fetchClassSubjects, saveClassSubjects, get, post, put, authDownload, getApiBase, type SubjectInfo } from '@/api'
+import { auth } from '@/utils/auth'
 
 const teacher = ref('')
+const isAdmin = ref(auth.user?.role === 'admin')
 const term = ref('')
 const subjects = ref<SubjectInfo[]>([])
 const classes = ref<string[]>([])
@@ -56,10 +58,10 @@ async function backup() {
   try {
     const res = await authDownload('/api/backup')
     const bytes = await res.arrayBuffer()
-    const name = `teacher-ledger-backup-${new Date().toISOString().slice(0, 10)}.db`
+    const name = `teacher-ledger-backup-${new Date().toISOString().slice(0, 10)}.zip`
     // WebView2 内 blob <a download> 无法触发系统下载，走后端一次性下载链接
     const token = localStorage.getItem('ledger_token') || ''
-    const save = await fetch(`/api/export/save?name=${encodeURIComponent(name)}`, {
+    const save = await fetch(`${getApiBase()}/api/export/save?name=${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${token}` },
       body: bytes,
@@ -67,7 +69,7 @@ async function backup() {
     const data = await save.json().catch(() => null)
     if (!save.ok || !data?.url) throw new Error(data?.message || '导出失败')
     const a = document.createElement('a')
-    a.href = data.url
+    a.href = getApiBase() + data.url
     a.download = name
     document.body.appendChild(a)
     a.click()
@@ -150,12 +152,17 @@ async function resetAll() {
 
       <div class="card">
         <div class="card-title">数据备份</div>
-        <div style="color: #8a93a8; font-size: 13px; line-height: 1.8">
-          所有数据保存在本地 SQLite 数据库文件中（<code>data/teacher-ledger.db</code>）。建议定期下载备份，换电脑时把备份文件放回 <code>data</code> 目录即可恢复。
+        <template v-if="isAdmin">
+          <div style="color: #8a93a8; font-size: 13px; line-height: 1.8">
+            管理员可下载<strong>全量备份</strong>（ZIP）：包含账号库、每个账号的台账数据与智能体配置。换电脑时解压到 <code>data</code> 目录即可完整恢复。
+          </div>
+          <el-button type="primary" plain style="margin-top: 12px" @click="backup">
+            <el-icon style="margin-right: 4px"><Download /></el-icon>下载全量备份（ZIP）
+          </el-button>
+        </template>
+        <div v-else style="color: #8a93a8; font-size: 13px; line-height: 1.8">
+          全量数据备份仅限管理员账号操作。如需备份，请联系管理员在「系统设置 → 数据备份」中下载。
         </div>
-        <el-button type="primary" plain style="margin-top: 12px" @click="backup">
-          <el-icon style="margin-right: 4px"><Download /></el-icon>下载数据库备份
-        </el-button>
       </div>
 
       <div class="card" style="border-color: #f6d5d5">

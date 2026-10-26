@@ -5,12 +5,18 @@ import * as IconsVue from '@element-plus/icons-vue'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import router from './router'
+import { resolveApiBase } from './api'
 import './assets/main.css'
 
-const app = createApp(App)
-app.use(router)
-app.use(ElementPlus, { locale: zhCn })
-for (const [name, comp] of Object.entries(IconsVue)) {
-  app.component(name, comp)
+// 桌面环境下先探测回环 API 端口（浏览器环境立即返回），再挂载应用
+const boot = async () => {
+  await resolveApiBase()
+  const app = createApp(App)
+  app.use(router)
+  app.use(ElementPlus, { locale: zhCn })
+  for (const [name, comp] of Object.entries(IconsVue)) {
+    app.component(name, comp)
+  }
+  app.mount('#app')
 }
-app.mount('#app')
+boot()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -176,7 +177,7 @@ type seededStudent struct {
 }
 
 func clearAllTables(tx *sql.Tx) error {
-	for _, t := range []string{"scores", "leaves", "rewards", "contacts", "exams", "students", "classes", "seat_layouts", "schedules", "class_subjects", "psy_sessions", "psy_assessments", "psy_profiles"} {
+	for _, t := range []string{"scores", "leaves", "rewards", "contacts", "exams", "students", "classes", "seat_layouts", "schedules", "class_subjects", "psy_sessions", "psy_assessments", "psy_profiles", "agent_messages", "agent_conversations"} {
 		if _, err := tx.Exec("DELETE FROM " + t); err != nil {
 			return err
 		}
@@ -387,4 +388,143 @@ func maybeSeed(d *sql.DB) {
 		log.Printf("演示数据灌入跳过：%v", err)
 		setSetting(d, "seeded", "1")
 	}
+}
+
+// —— 心理板块演示数据（独立于主演示数据灌入，老库升级后首次启动也会补） ——
+
+// 按比例构造原始答案：count 道题、每题范围 [minV,maxV]、总和尽量贴近 target
+func psyAnswers(count, minV, target int) []float64 {
+	ans := make([]float64, count)
+	for i := range ans {
+		ans[i] = float64(minV)
+	}
+	left := target - minV*count
+	for i := 0; left > 0; i = (i + 1) % count {
+		ans[i]++
+		left--
+	}
+	return ans
+}
+
+type psySeedProfile struct {
+	idxCls, idxStu      int
+	risk, tags, note    string
+	sessions            [][]string // date, mode, topic, content, next_follow
+	scales              [][2]int   // [量表序号, 目标原始分]
+}
+
+// maybeSeedPsy 心理档案/辅导记录/测评的演示数据（只做一次；用户清空数据后不会复活）
+func maybeSeedPsy(d *sql.DB) {
+	if getSetting(d, "seed_psy_v1", "") == "1" {
+		return
+	}
+	defer setSetting(d, "seed_psy_v1", "1")
+	if queryCount(d, `SELECT COUNT(*) c FROM psy_profiles`) > 0 {
+		return
+	}
+	rows, err := queryAll(d, `SELECT id, name, gender, class_name FROM students ORDER BY class_name, CAST(student_no AS INTEGER)`)
+	if err != nil || len(rows) < 20 {
+		return
+	}
+	byClass := map[string][]map[string]any{}
+	cls := []string{}
+	for _, row := range rows {
+		c := toStr(row["class_name"])
+		if _, ok := byClass[c]; !ok {
+			cls = append(cls, c)
+		}
+		byClass[c] = append(byClass[c], row)
+	}
+	sort.Strings(cls)
+	pick := func(ci, idx int) map[string]any {
+		if ci >= len(cls) {
+			ci = 0
+		}
+		list := byClass[cls[ci]]
+		if idx >= len(list) {
+			return nil
+		}
+		return list[idx]
+	}
+
+	scaleOrder := []string{"PHQ-9", "GAD-7", "SAS", "SDS"}
+	scaleItems := map[string]int{"PHQ-9": 9, "GAD-7": 7, "SAS": 20, "SDS": 20}
+	scaleMin := map[string]int{"PHQ-9": 0, "GAD-7": 0, "SAS": 1, "SDS": 1}
+
+	plans := []psySeedProfile{
+		{
+			0, 6, "高危预警", "情绪低落,家庭变故,自我评价低",
+			"父母近期离异，上课注意力明显下降，两次被同学发现在厕所哭泣；自我评价低，觉得「自己很多余」。",
+			[][]string{
+				{"2026-09-15", "面谈", "入学适应与家庭情况了解", "首次谈话建立信任。学生讲述父母暑假离异，目前随母亲生活，父亲较少联系。情绪低落但能正常交流，约定每周谈心一次。", "2026-09-22"},
+				{"2026-10-09", "面谈", "情绪低落随访", "近两周睡眠差，常凌晨一两点才能入睡。课堂有发呆现象。教了腹式呼吸放松法，建议规律作息；已与母亲电话沟通其在家的情绪表现。", "2026-10-16"},
+				{"2026-10-22", "面谈", "危机筛查后的跟进面谈", "PHQ-9 测评提示中重度抑郁倾向且第9题有分。当面温和核实时学生承认偶有「活着没意思」的念头但无具体计划。已联系监护人建议尽快到专科医院评估，启动重点关注流程，每三日跟进。", "2026-10-29"},
+			},
+			[][2]int{{0, 15}, {3, 52}},
+		},
+		{
+			1, 9, "重点关注", "考试焦虑,失眠,完美主义",
+			"临近月考反复出现心慌、手心出汗，担心「考砸了就完了」，自我要求高，睡前反复检查书包。",
+			[][]string{
+				{"2026-10-13", "面谈", "考试焦虑初谈", "学生对成绩的灾难化想象明显（一次考差=前途尽毁）。用认知重构练习识别自动思维，布置「担忧记录表」。", "2026-10-20"},
+				{"2026-10-24", "面谈", "放松训练与作息调整", "教导渐进式肌肉放松与4-7-8呼吸法，睡前一小时不碰手机。月考临近，与其约定「完成比完美重要」的应考口号。", "2026-10-24"},
+			},
+			[][2]int{{1, 11}, {2, 48}},
+		},
+		{
+			0, 21, "常规关注", "人际适应,性格内向",
+			"性格内向，课间常独处；主动求助想「交朋友但不知道怎么开口」，未见情绪异常。",
+			[][]string{
+				{"2026-10-17", "面谈", "人际交往困扰", "学生表达交友意愿但缺乏方法。讨论从同桌、小组合作切入，布置「每周一次主动搭话」小任务；鼓励参加班级图书角值班。", ""},
+			},
+			[][2]int{{0, 5}},
+		},
+	}
+
+	tx, err := d.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	for _, p := range plans {
+		stu := pick(p.idxCls, p.idxStu)
+		if stu == nil {
+			continue
+		}
+		res, err := tx.Exec(`INSERT INTO psy_profiles(student_name, class_name, gender, risk_level, tags, note, created_at, updated_at)
+			VALUES (?,?,?,?,?,?, datetime('now','localtime','-30 days'), datetime('now','localtime'))`,
+			toStr(stu["name"]), toStr(stu["class_name"]), toStr(stu["gender"]), p.risk, p.tags, p.note)
+		if err != nil {
+			return
+		}
+		pid, _ := res.LastInsertId()
+		for _, s := range p.sessions {
+			if _, err := tx.Exec(`INSERT INTO psy_sessions(profile_id, session_date, mode, topic, content, next_follow, created_at)
+				VALUES (?,?,?,?,?,?, ? || ' 15:30:00')`, pid, s[0], s[1], s[2], s[3], s[4], s[0]); err != nil {
+				return
+			}
+		}
+		for _, sc := range p.scales {
+			scale := scaleOrder[sc[0]]
+			answers := psyAnswers(scaleItems[scale], scaleMin[scale], sc[1])
+			score, level, flagged, err := scoreAssessment(scale, answers)
+			if err != nil {
+				return
+			}
+			flag := 0
+			if flagged {
+				flag = 1
+			}
+			ansJSON, _ := json.Marshal(answers)
+			if _, err := tx.Exec(`INSERT INTO psy_assessments(profile_id, scale, answers, score, level, flagged, created_at)
+				VALUES (?,?,?,?,?,?, datetime('now','localtime','-5 days'))`, pid, scale, string(ansJSON), score, level, flag); err != nil {
+				return
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return
+	}
+	log.Println("心理板块演示数据已就绪：3 份档案（含辅导记录与量表测评）")
 }

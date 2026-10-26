@@ -1,9 +1,40 @@
 import { auth, clearSession } from '@/utils/auth'
 
+// —— API 基址 ——
+// 浏览器 / 服务模式：同源 '' 即可。
+// 桌面应用（Wails 内嵌通道，hostname 为 wails.localhost）：内嵌通道不支持流式响应，
+// 桌面端会另起本机回环 HTTP 监听（18520 起连续端口），这里探测出可用端口后直连。
+let apiBase = ''
+
+export function getApiBase() {
+  return apiBase
+}
+
+export async function resolveApiBase(): Promise<string> {
+  if (location.hostname !== 'wails.localhost') return ''
+  if (apiBase) return apiBase
+  const probes = Array.from({ length: 10 }, (_, i) => 18520 + i).map(async (port) => {
+    try {
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), 1500)
+      const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: ctl.signal })
+      clearTimeout(timer)
+      const j = await res.json()
+      if (j?.ok && j?.app === 'teacher-ledger') return `http://127.0.0.1:${port}`
+    } catch {
+      /* 端口不通继续下一个 */
+    }
+    return ''
+  })
+  const found = await Promise.all(probes)
+  apiBase = found.find(Boolean) ?? ''
+  return apiBase
+}
+
 async function req(url: string, options: RequestInit = {}) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (auth.token) headers.Authorization = `Bearer ${auth.token}`
-  const res = await fetch(url, { headers, ...options })
+  const res = await fetch(apiBase + url, { headers, ...options })
   let data: any = null
   try {
     data = await res.json()
@@ -25,7 +56,7 @@ export const del = (url: string) => req(url, { method: 'DELETE' })
 
 // 需要认证的文件下载：返回原始 Response（blob 由调用方处理）
 export function authDownload(url: string): Promise<Response> {
-  return fetch(url, { headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {} }).then((res) => {
+  return fetch(apiBase + url, { headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {} }).then((res) => {
     if (res.status === 401) {
       clearSession()
       location.href = '/login'
@@ -38,7 +69,7 @@ export function authDownload(url: string): Promise<Response> {
 
 // 智能体流式对话：调用方拿到 Response 自行读取 SSE 流
 export function agentStream(body: any): Promise<Response> {
-  return fetch('/api/agent/chat', {
+  return fetch(apiBase + '/api/agent/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(auth.token ? { Authorization: `Bearer ${auth.token}` } : {}) },
     body: JSON.stringify(body),
@@ -52,6 +83,21 @@ export function agentStream(body: any): Promise<Response> {
     return res
   })
 }
+
+// 智能体对话历史
+export interface ConvItem {
+  id: number
+  title: string
+  mode: string
+  model: string
+  created_at: string
+  updated_at: string
+  msg_count: number
+  preview: string
+}
+export const fetchConversations = (): Promise<ConvItem[]> => get('/api/agent/conversations')
+export const fetchConversation = (id: number): Promise<any> => get(`/api/agent/conversations/${id}`)
+export const deleteConversation = (id: number) => del(`/api/agent/conversations/${id}`)
 
 // 常用数据
 export interface SubjectInfo {

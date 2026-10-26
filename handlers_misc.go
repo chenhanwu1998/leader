@@ -15,7 +15,7 @@ import (
 
 func registerMiscRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"ok": true, "time": time.Now().Format(time.RFC3339)})
+		writeJSON(w, 200, map[string]any{"ok": true, "app": "teacher-ledger", "time": time.Now().Format(time.RFC3339)})
 	})
 
 	// 全局设置（科目列表等）
@@ -51,19 +51,20 @@ func registerMiscRoutes(mux *http.ServeMux) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})
 
-	// 数据备份：先合并 WAL 再下载当前账号的 db 文件
+	// 全量数据备份（仅管理员）：账号库 + 各账号台账库 + 智能体配置，统一打 zip
 	mux.HandleFunc("GET /api/backup", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := ledgerDB(r).Query(`PRAGMA wal_checkpoint(TRUNCATE)`)
-		if err == nil {
-			rows.Close()
+		if requireAdmin(w, r) == nil {
+			return
 		}
-		username := bootUser
-		if u := currentUser(r); u != nil {
-			username = u.Username
+		buf, err := buildFullBackup()
+		if err != nil {
+			fail(w, 500, "备份失败："+err.Error())
+			return
 		}
-		name := "teacher-ledger-backup-" + time.Now().Format("2006-01-02") + ".db"
+		name := "teacher-ledger-backup-" + time.Now().Format("2006-01-02") + ".zip"
+		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"; filename*=UTF-8''`+url.PathEscape(name))
-		http.ServeFile(w, r, filepath.Clean(ledgerFile(username)))
+		w.Write(buf)
 	})
 
 	// 清空全部业务数据（保留设置）
@@ -126,6 +127,8 @@ func handleExportSave(w http.ResponseWriter, r *http.Request) {
 		mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	case strings.HasSuffix(strings.ToLower(name), ".csv"):
 		mime = "text/csv; charset=utf-8"
+	case strings.HasSuffix(strings.ToLower(name), ".zip"):
+		mime = "application/zip"
 	}
 	var idBytes [12]byte
 	rand.Read(idBytes[:])

@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx'
+import { getApiBase } from '@/api'
 
 export interface RowData {
   [key: string]: any
@@ -7,11 +8,11 @@ export interface RowData {
 /**
  * 桌面应用（WebView2 内）不能直接用 blob <a download> 触发系统下载，
  * 统一把生成的文件字节交给本地后端，再导航到一次性下载链接，由系统下载管理器接管。
- * 浏览器开发环境下此链路同样可用。
+ * 浏览器开发环境下此链路同样可用；桌面内 API 走回环端口时自动带上基址前缀。
  */
 async function saveViaServer(bytes: ArrayBuffer, filename: string) {
   const token = localStorage.getItem('ledger_token') || ''
-  const res = await fetch(`/api/export/save?name=${encodeURIComponent(filename)}`, {
+  const res = await fetch(`${getApiBase()}/api/export/save?name=${encodeURIComponent(filename)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: bytes,
@@ -25,7 +26,7 @@ async function saveViaServer(bytes: ArrayBuffer, filename: string) {
   }
   if (!res.ok || !data?.url) throw new Error(data?.message || '导出失败')
   const a = document.createElement('a')
-  a.href = data.url
+  a.href = getApiBase() + data.url
   a.download = filename
   document.body.appendChild(a)
   a.click()

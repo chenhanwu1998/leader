@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { get, agentStream } from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { get, agentStream, fetchConversations, fetchConversation, deleteConversation, type ConvItem } from '@/api'
 import { auth } from '@/utils/auth'
 import { renderMarkdown } from '@/utils/markdown'
 
@@ -9,6 +9,7 @@ interface Msg {
   role: 'user' | 'assistant'
   content: string
   sources?: { n: number; title: string }[]
+  created_at?: string
 }
 
 const meta = ref<{ models: { id: string; label: string }[]; default_model: string; ready: boolean; knowledge_base: boolean } | null>(null)
@@ -17,6 +18,12 @@ const psych = ref(false)
 const input = ref('')
 const sending = ref(false)
 const listEl = ref<HTMLElement>()
+
+// 历史会话
+const convs = ref<ConvItem[]>([])
+const convId = ref<number>(0)
+const convsOpen = ref(true)
+const loadingConv = ref(false)
 
 const messages = reactive<Msg[]>([])
 
@@ -34,12 +41,69 @@ onMounted(async () => {
   } catch {
     /* meta 失败也能发，后端有兜底 */
   }
+  await refreshConvs()
 })
+
+async function refreshConvs() {
+  try {
+    convs.value = await fetchConversations()
+  } catch {
+    /* 列表失败不影响对话 */
+  }
+}
 
 function scrollBottom() {
   nextTick(() => {
     if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
   })
+}
+
+function newChat() {
+  if (sending.value) return
+  convId.value = 0
+  messages.splice(0)
+}
+
+async function openConv(id: number) {
+  if (sending.value || id === convId.value) return
+  loadingConv.value = true
+  try {
+    const conv = await fetchConversation(id)
+    convId.value = conv.id
+    psych.value = conv.mode === 'psych'
+    if (conv.model && meta.value?.models.some((m) => m.id === conv.model)) model.value = conv.model
+    messages.splice(0, messages.length, ...conv.messages.map((m: any) => ({
+      role: m.role, content: m.content, sources: m.sources ?? [], created_at: m.created_at,
+    })))
+    scrollBottom()
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  } finally {
+    loadingConv.value = false
+  }
+}
+
+async function removeConv(id: number) {
+  try {
+    await ElMessageBox.confirm('删除后该对话的全部消息不可恢复。', '删除对话', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch {
+    return
+  }
+  await deleteConversation(id)
+  if (convId.value === id) newChat()
+  await refreshConvs()
+  ElMessage.success('已删除')
+}
+
+function fmtTime(s?: string) {
+  if (!s) return ''
+  const d = new Date(s.replace(' ', 'T'))
+  if (Number.isNaN(d.getTime())) return s.slice(5, 16)
+  const today = new Date()
+  const sameDay = d.toDateString() === today.toDateString()
+  return sameDay
+    ? `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    : `${d.getMonth() + 1}-${d.getDate()}`
 }
 
 async function send(text?: string) {
@@ -51,10 +115,12 @@ async function send(text?: string) {
   messages.push(assistantMsg)
   scrollBottom()
   sending.value = true
+  let needRefreshList = !convId.value
   try {
     const res = await agentStream({
       model: model.value,
       psych: psych.value,
+      conversation_id: convId.value || undefined,
       messages: messages.filter((m) => m !== assistantMsg).map((m) => ({ role: m.role, content: m.content })),
     })
     const reader = res.body!.getReader()
@@ -75,7 +141,13 @@ async function send(text?: string) {
             event = line.slice(6).trim()
           } else if (line.startsWith('data:')) {
             const payload = line.slice(5).trim()
-            if (event === 'sources') {
+            if (event === 'conversation') {
+              try {
+                convId.value = Number(JSON.parse(payload).id) || convId.value
+              } catch {
+                /* 忽略 */
+              }
+            } else if (event === 'sources') {
               try {
                 assistantMsg.sources = JSON.parse(payload)
               } catch {
@@ -104,11 +176,8 @@ async function send(text?: string) {
   } finally {
     sending.value = false
     scrollBottom()
+    if (needRefreshList || convId.value) refreshConvs()
   }
-}
-
-function clearChat() {
-  messages.splice(0)
 }
 
 function usePrompt(p: { psych: boolean; text: string }) {
@@ -119,9 +188,39 @@ function usePrompt(p: { psych: boolean; text: string }) {
 
 <template>
   <div class="agent-page">
+    <!-- 历史会话侧栏 -->
+    <aside v-show="convsOpen" class="conv-rail">
+      <div class="rail-head">
+        <span class="rail-title">历史对话</span>
+        <el-button size="small" type="primary" plain @click="newChat">＋ 新对话</el-button>
+      </div>
+      <div class="rail-list" v-loading="loadingConv">
+        <div v-if="!convs.length" class="rail-empty">还没有对话记录</div>
+        <div
+          v-for="c in convs"
+          :key="c.id"
+          class="conv-item"
+          :class="{ active: c.id === convId }"
+          @click="openConv(c.id)"
+        >
+          <div class="conv-top">
+            <span class="conv-title">{{ c.title }}</span>
+            <span class="conv-time">{{ fmtTime(c.updated_at) }}</span>
+          </div>
+          <div class="conv-bottom">
+            <span class="conv-preview">{{ c.preview || '（暂无消息）' }}</span>
+            <el-icon class="conv-del" title="删除对话" @click.stop="removeConv(c.id)"><Delete /></el-icon>
+          </div>
+        </div>
+      </div>
+    </aside>
+
     <div class="chat-panel">
       <div class="panel-head">
         <div class="head-left">
+          <el-tooltip :content="convsOpen ? '收起历史' : '展开历史'" placement="bottom">
+            <el-icon class="rail-toggle" @click="convsOpen = !convsOpen"><Expand v-if="!convsOpen" /><Fold v-else /></el-icon>
+          </el-tooltip>
           <el-select v-model="model" size="small" style="width: 220px">
             <el-option v-for="m in meta?.models ?? []" :key="m.id" :value="m.id" :label="m.label" />
           </el-select>
@@ -130,14 +229,14 @@ function usePrompt(p: { psych: boolean; text: string }) {
             <el-icon class="kb" :class="{ on: meta?.knowledge_base }"><Collection /></el-icon>
           </el-tooltip>
         </div>
-        <el-button size="small" text type="info" @click="clearChat">清空对话</el-button>
+        <el-button size="small" text type="info" @click="newChat">新对话</el-button>
       </div>
 
       <div ref="listEl" class="msg-list">
         <div v-if="!messages.length" class="empty">
           <div class="empty-logo">🤖</div>
           <p>你好，{{ auth.user?.display_name }}。我是你的智能助手。</p>
-          <p class="dim">通用模式处理班级事务；打开「心理模式」后会优先检索校园心理健康知识库作答。</p>
+          <p class="dim">通用模式处理班级事务；打开「心理模式」后会优先检索校园心理健康知识库作答。对话会自动保存，可在左侧回看。</p>
           <div class="prompts">
             <el-button v-for="p in QUICK_PROMPTS" :key="p.text" size="small" round plain @click="usePrompt(p)">{{ p.text }}</el-button>
           </div>
@@ -179,10 +278,122 @@ function usePrompt(p: { psych: boolean; text: string }) {
   padding: 16px 20px;
   box-sizing: border-box;
   display: flex;
+  gap: 14px;
 }
 
+/* —— 历史会话侧栏 —— */
+.conv-rail {
+  width: 264px;
+  flex-shrink: 0;
+  background: #fff;
+  border: 1px solid #eef0f6;
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid #f2f4f9;
+}
+
+.rail-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #3a4460;
+}
+
+.rail-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.rail-empty {
+  text-align: center;
+  color: #b6bdcf;
+  font-size: 12.5px;
+  margin-top: 40px;
+}
+
+.conv-item {
+  padding: 9px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+}
+
+.conv-item:hover {
+  background: #f6f8fe;
+}
+
+.conv-item.active {
+  background: #eef2ff;
+  border-color: #dbe3ff;
+}
+
+.conv-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.conv-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2f3646;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-time {
+  font-size: 11px;
+  color: #a8b0c6;
+  flex-shrink: 0;
+}
+
+.conv-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+.conv-preview {
+  font-size: 12px;
+  color: #8a93ab;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-del {
+  font-size: 13px;
+  color: #c3c9d9;
+  flex-shrink: 0;
+  visibility: hidden;
+}
+
+.conv-item:hover .conv-del {
+  visibility: visible;
+}
+
+.conv-del:hover {
+  color: #e06b5a;
+}
+
+/* —— 对话面板 —— */
 .chat-panel {
   flex: 1;
+  min-width: 0;
   background: #fff;
   border: 1px solid #eef0f6;
   border-radius: 14px;
@@ -205,6 +416,16 @@ function usePrompt(p: { psych: boolean; text: string }) {
   gap: 14px;
 }
 
+.rail-toggle {
+  cursor: pointer;
+  color: #7a839b;
+  font-size: 17px;
+}
+
+.rail-toggle:hover {
+  color: #4f6bed;
+}
+
 .kb {
   color: #c3c9d9;
   font-size: 18px;
@@ -223,7 +444,7 @@ function usePrompt(p: { psych: boolean; text: string }) {
 .empty {
   text-align: center;
   color: #5a6378;
-  margin-top: 8vh;
+  margin-top: 6vh;
 }
 
 .empty-logo {
