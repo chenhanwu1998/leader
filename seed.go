@@ -208,7 +208,6 @@ func seedDemo(d *sql.DB, force bool) error {
 
 	// 基础设置
 	for _, kv := range [][2]string{
-		{"teacher_name", "王丽华"},
 		{"term", "2026-2027学年第一学期"},
 	} {
 		if _, err := tx.Exec(`INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, kv[0], kv[1]); err != nil {

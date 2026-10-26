@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { get, put, post } from '@/api'
+import { get, post } from '@/api'
 import { auth, clearSession } from '@/utils/auth'
 
 const route = useRoute()
@@ -10,48 +10,16 @@ const router = useRouter()
 const isLoginPage = computed(() => route.name === 'login')
 const title = computed(() => (route.meta.title as string) || '')
 
-const teacher = ref('')
 const term = ref('')
 
 async function loadProfile() {
   try {
-    teacher.value = (await get('/api/settings/teacher_name')).value
     term.value = (await get('/api/settings/term')).value
   } catch {
     /* 首次启动为空 */
   }
 }
 onMounted(loadProfile)
-
-// 个人信息编辑（教师姓名 / 学期，按账号独立保存）
-const profileVisible = ref(false)
-const profileForm = ref({ teacher_name: '', term: '' })
-const profileSaving = ref(false)
-
-function openProfile() {
-  profileForm.value = { teacher_name: teacher.value, term: term.value }
-  profileVisible.value = true
-}
-
-async function saveProfile() {
-  if (!profileForm.value.teacher_name?.trim()) {
-    ElMessage.warning('请填写教师姓名')
-    return
-  }
-  profileSaving.value = true
-  try {
-    await put('/api/settings/teacher_name', { value: profileForm.value.teacher_name.trim() })
-    await put('/api/settings/term', { value: profileForm.value.term?.trim() ?? '' })
-    teacher.value = profileForm.value.teacher_name.trim()
-    term.value = profileForm.value.term?.trim() ?? ''
-    profileVisible.value = false
-    ElMessage.success('个人信息已更新')
-  } catch (e: any) {
-    ElMessage.error(e.message)
-  } finally {
-    profileSaving.value = false
-  }
-}
 
 const menus = computed(() => {
   const list = [
@@ -75,8 +43,8 @@ const menus = computed(() => {
 async function onUserCommand(cmd: string) {
   if (cmd === 'account') {
     router.push('/account')
-  } else if (cmd === 'profile') {
-    openProfile()
+  } else if (cmd === 'account-settings') {
+    router.push('/settings')
   } else if (cmd === 'logout') {
     try {
       await post('/api/auth/logout', {})
@@ -115,7 +83,6 @@ async function onUserCommand(cmd: string) {
         <div class="topbar-title">{{ title }}</div>
         <div class="topbar-right">
           <el-tag v-if="term" effect="plain" round type="primary">{{ term }}</el-tag>
-          <span v-if="teacher" class="teacher-name">{{ teacher }}</span>
           <el-dropdown trigger="click" @command="onUserCommand">
             <div class="user-trigger">
               <el-avatar :size="30" :src="auth.user?.avatar" class="avatar" />
@@ -125,7 +92,7 @@ async function onUserCommand(cmd: string) {
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item command="account"><el-icon><Postcard /></el-icon>个人中心</el-dropdown-item>
-                <el-dropdown-item command="profile"><el-icon><EditPen /></el-icon>教师信息</el-dropdown-item>
+                <el-dropdown-item command="account-settings"><el-icon><Setting /></el-icon>系统设置</el-dropdown-item>
                 <el-dropdown-item command="logout" divided><el-icon><SwitchButton /></el-icon>退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -141,21 +108,6 @@ async function onUserCommand(cmd: string) {
       </el-main>
     </el-container>
 
-    <!-- 个人信息 -->
-    <el-dialog v-model="profileVisible" title="教师信息" width="420px">
-      <el-form :model="profileForm" label-width="84px">
-        <el-form-item label="教师姓名" required>
-          <el-input v-model="profileForm.teacher_name" placeholder="如：王丽华" />
-        </el-form-item>
-        <el-form-item label="当前学期">
-          <el-input v-model="profileForm.term" placeholder="如：2026-2027学年第一学期" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="profileVisible = false">取消</el-button>
-        <el-button type="primary" :loading="profileSaving" @click="saveProfile">保存</el-button>
-      </template>
-    </el-dialog>
   </el-container>
 </template>
 
@@ -247,11 +199,6 @@ async function onUserCommand(cmd: string) {
   gap: 12px;
   color: #5a6378;
   font-size: 13px;
-}
-
-.teacher-name {
-  font-weight: 600;
-  color: #3a4257;
 }
 
 .user-trigger {

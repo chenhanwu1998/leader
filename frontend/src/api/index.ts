@@ -67,6 +67,32 @@ export function authDownload(url: string): Promise<Response> {
   })
 }
 
+// WebView2 内 blob <a download> 无法触发系统下载：文件字节先回传本地后端，
+// 再导航到一次性下载链接，由系统下载管理器接管（与 excel.ts 导出同一链路）
+export async function downloadFile(url: string, filename: string) {
+  const res = await authDownload(url)
+  const bytes = await res.arrayBuffer()
+  const token = localStorage.getItem('ledger_token') || ''
+  const saved = await fetch(`${getApiBase()}/api/export/save?name=${encodeURIComponent(filename)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: bytes,
+  })
+  const data = await saved.json().catch(() => null)
+  if (saved.status === 401) {
+    clearSession()
+    location.href = '/login'
+    throw new Error('登录已过期')
+  }
+  if (!saved.ok || !data?.url) throw new Error(data?.message || `下载失败（${saved.status}）`)
+  const a = document.createElement('a')
+  a.href = getApiBase() + data.url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
 // 智能体流式对话：调用方拿到 Response 自行读取 SSE 流
 export function agentStream(body: any): Promise<Response> {
   return fetch(apiBase + '/api/agent/chat', {

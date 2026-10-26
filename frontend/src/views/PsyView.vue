@@ -2,11 +2,35 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { get, post, put, del, fetchClasses } from '@/api'
+import { get, post, put, del, fetchClasses, downloadFile } from '@/api'
 
 const router = useRouter()
 const RISK_LEVELS = ['常规关注', '重点关注', '高危预警']
 const riskType = (l: string) => (l === '高危预警' ? 'danger' : l === '重点关注' ? 'warning' : 'info')
+
+interface ScaleOption {
+  label: string
+  score: number
+}
+interface ScaleThreshold {
+  min: number
+  level: string
+  note: string
+}
+interface Scale {
+  id: string
+  name: string
+  hint: string
+  builtin: boolean
+  options: ScaleOption[]
+  items: string[]
+  reverse: number[]
+  score_mode: 'sum' | 'std125'
+  thresholds: ScaleThreshold[]
+  flag_item: number
+  flag_min: number
+  flag_note: string
+}
 
 // —— 总览 ——
 const stats = ref<{ by_risk: { risk_level: string; n: number }[]; recent_assessments: any[]; flagged: number; sessions_this_month: number } | null>(null)
@@ -142,19 +166,33 @@ async function removeAssessment(a: any) {
   detail.value = await get(`/api/psy/profiles/${detail.value.id}`)
 }
 
-// —— 测评 ——
-const scales = ref<{ id: string; name: string; hint: string; options: string[]; items: string[]; min: number }[]>([])
+// —— 量表数据 ——
+const scales = ref<Scale[]>([])
 async function loadScales() {
   scales.value = await get('/api/psy/scales')
 }
 
+// —— 心理测评 tab ——
+const quizProfileId = ref<number | ''>('')
+
+function startQuizFor(s: Scale) {
+  if (!quizProfileId.value) {
+    ElMessage.warning('请先选择要测评的学生（来自心理档案）')
+    return
+  }
+  const p = profiles.value.find((x) => x.id === quizProfileId.value)
+  if (!p) return
+  startQuiz(p, s.id)
+}
+
+// —— 测评问卷 ——
 const quizDialog = ref(false)
-const quiz = reactive({ profile: null as any, scale: null as any, answers: [] as number[], result: null as any })
+const quiz = reactive({ profile: null as any, scale: null as Scale | null, answers: [] as number[], result: null as any })
 
 function startQuiz(profile: any, scaleId = '') {
   quiz.profile = profile
   quiz.scale = scales.value.find((s) => s.id === scaleId) ?? null
-  quiz.answers = []
+  quiz.answers = quiz.scale ? Array(quiz.scale.items.length).fill(-1) : []
   quiz.result = null
   quizDialog.value = true
 }
@@ -167,6 +205,16 @@ function pickScale(id: string) {
 
 const quizProgress = computed(() => (quiz.scale ? quiz.answers.filter((a) => a >= 0).length : 0))
 const submittingQuiz = ref(false)
+
+// 结果解释：得分命中的分档 note + 触发预警题时的说明
+const resultNote = computed(() => {
+  if (!quiz.result || !quiz.scale) return ''
+  const parts: string[] = []
+  const hit = quiz.scale.thresholds.find((t) => quiz.result.score >= t.min)
+  if (hit?.note?.trim()) parts.push(hit.note.trim())
+  if (quiz.result.flagged && quiz.scale.flag_note?.trim()) parts.push(quiz.scale.flag_note.trim())
+  return parts.join('\n')
+})
 
 async function submitQuiz() {
   if (!quiz.scale || quiz.answers.some((a) => a < 0)) {
@@ -184,6 +232,202 @@ async function submitQuiz() {
   } finally {
     submittingQuiz.value = false
   }
+}
+
+// —— 问卷导出 / 打印 ——
+async function exportScaleDocx(s: Scale) {
+  try {
+    await downloadFile(`/api/psy/scales/${encodeURIComponent(s.id)}/export.docx`, `${s.name}-问卷.docx`)
+  } catch (e: any) {
+    ElMessage.error(e.message || '导出失败')
+  }
+}
+
+function escHtml(t: string) {
+  return t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
+}
+
+function buildPrintHtml(s: Scale) {
+  const rows = s.items
+    .map(
+      (item, i) => `
+      <div class="item">
+        <div class="q">${i + 1}. ${escHtml(item)}</div>
+        <div class="opts">${s.options.map((o) => `<span class="opt">□ ${escHtml(o.label)}</span>`).join('')}</div>
+      </div>`
+    )
+    .join('')
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escHtml(s.name)}</title>
+  <style>
+    @page { margin: 18mm; }
+    body { font-family: 'Microsoft YaHei', 'SimSun', sans-serif; color: #222; font-size: 13px; line-height: 1.7; }
+    h1 { text-align: center; font-size: 20px; margin: 0 0 8px; }
+    .hint { background: #f6f7fb; border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; color: #445; }
+    .meta { display: flex; gap: 36px; margin: 10px 0 14px; border-bottom: 1px solid #ccc; padding-bottom: 10px; }
+    .item { margin: 12px 0; page-break-inside: avoid; border-bottom: 1px dashed #eee; padding-bottom: 8px; }
+    .q { font-weight: 600; margin-bottom: 4px; }
+    .opts { display: flex; flex-wrap: wrap; gap: 18px; color: #333; }
+    .foot { margin-top: 18px; color: #999; font-size: 11px; }
+  </style></head><body>
+  <h1>${escHtml(s.name)}</h1>
+  <div class="hint">指导语：${escHtml(s.hint || '请根据最近一段时间的实际情况作答，答案没有对错之分。')}</div>
+  <div class="meta"><span>班级：＿＿＿＿＿＿＿＿</span><span>姓名：＿＿＿＿＿＿＿＿</span><span>日期：＿＿＿＿＿＿＿＿</span></div>
+  ${rows}
+  <div class="foot">本问卷仅用于校园心理健康筛查参考，不能替代专业医疗诊断。</div>
+  </body></html>`
+}
+
+function printScale(s: Scale) {
+  // 隐藏 iframe 承载打印页，浏览器与 WebView2 都能正常弹出系统打印对话框
+  const iframe = document.createElement('iframe')
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0'
+  document.body.appendChild(iframe)
+  const doc = iframe.contentWindow?.document
+  if (!doc) {
+    iframe.remove()
+    return ElMessage.error('打印窗口创建失败')
+  }
+  doc.open()
+  doc.write(buildPrintHtml(s))
+  doc.close()
+  iframe.contentWindow?.focus()
+  setTimeout(() => {
+    iframe.contentWindow?.print()
+    setTimeout(() => iframe.remove(), 1000)
+  }, 200)
+}
+
+// —— 量表管理 ——
+const scaleDialog = ref(false)
+const savingScales = ref(false)
+const scaleForm = reactive({
+  editing: false,
+  builtin: false,
+  id: '',
+  name: '',
+  hint: '',
+  itemsText: '',
+  options: [] as ScaleOption[],
+  reverseText: '',
+  score_mode: 'sum' as 'sum' | 'std125',
+  thresholds: [] as ScaleThreshold[],
+  flag_item: 0,
+  flag_min: 1,
+  flag_note: '',
+})
+
+function openScaleDialog(s?: Scale) {
+  if (s) {
+    Object.assign(scaleForm, {
+      editing: true,
+      builtin: s.builtin,
+      id: s.id,
+      name: s.name,
+      hint: s.hint,
+      itemsText: s.items.join('\n'),
+      options: s.options.map((o) => ({ ...o })),
+      reverseText: s.reverse.map((i) => i + 1).join(', '),
+      score_mode: s.score_mode,
+      thresholds: s.thresholds.map((t) => ({ ...t })),
+      flag_item: s.flag_item,
+      flag_min: s.flag_min,
+      flag_note: s.flag_note,
+    })
+  } else {
+    Object.assign(scaleForm, {
+      editing: false,
+      builtin: false,
+      id: '',
+      name: '',
+      hint: '请根据最近一段时间的实际情况作答，答案没有对错之分。',
+      itemsText: '',
+      options: [
+        { label: '完全不会', score: 0 },
+        { label: '偶尔', score: 1 },
+        { label: '经常', score: 2 },
+        { label: '几乎每天', score: 3 },
+      ],
+      reverseText: '',
+      score_mode: 'sum' as const,
+      thresholds: [{ min: 0, level: '正常范围', note: '' }],
+      flag_item: 0,
+      flag_min: 1,
+      flag_note: '',
+    })
+  }
+  scaleDialog.value = true
+}
+
+function parseReverse(text: string, itemCount: number) {
+  const seen = new Set<number>()
+  for (const part of text.split(/[,，、\s]+/).filter(Boolean)) {
+    const n = Number(part)
+    if (Number.isInteger(n) && n >= 1 && n <= itemCount) seen.add(n - 1)
+  }
+  return [...seen].sort((a, b) => a - b)
+}
+
+async function saveScaleDialog() {
+  const items = scaleForm.itemsText
+    .split('\n')
+    .map((t) => t.trim())
+    .filter(Boolean)
+  if (!scaleForm.id.trim() || !/^[A-Za-z0-9_-]{1,32}$/.test(scaleForm.id.trim())) return ElMessage.warning('量表编号须为 1-32 位字母/数字/中划线/下划线')
+  if (!scaleForm.name.trim()) return ElMessage.warning('请填写量表名称')
+  if (!items.length) return ElMessage.warning('请至少填写一道题目（每行一题）')
+  if (scaleForm.options.length < 2) return ElMessage.warning('请至少保留两个选项')
+  if (scaleForm.options.some((o) => !o.label.trim())) return ElMessage.warning('选项文字不能为空')
+  if (!scaleForm.thresholds.length || scaleForm.thresholds.some((t) => !t.level.trim())) return ElMessage.warning('请至少保留一档结果分档，且等级名称不能为空')
+
+  const scale: Scale = {
+    id: scaleForm.id.trim(),
+    name: scaleForm.name.trim(),
+    hint: scaleForm.hint.trim(),
+    builtin: scaleForm.builtin,
+    options: scaleForm.options.map((o) => ({ label: o.label.trim(), score: Number(o.score) || 0 })),
+    items,
+    reverse: parseReverse(scaleForm.reverseText, items.length),
+    score_mode: scaleForm.score_mode,
+    thresholds: [...scaleForm.thresholds].map((t) => ({ min: Number(t.min) || 0, level: t.level.trim(), note: (t.note ?? '').trim() })).sort((a, b) => b.min - a.min),
+    flag_item: Number(scaleForm.flag_item) || 0,
+    flag_min: Number(scaleForm.flag_min) || 0,
+    flag_note: scaleForm.flag_note.trim(),
+  }
+  const list = scaleForm.editing ? scales.value.map((s) => (s.id === scale.id ? scale : s)) : [...scales.value.filter((s) => s.id !== scale.id), scale]
+  savingScales.value = true
+  try {
+    scales.value = await put('/api/psy/scales', { scales: list })
+    ElMessage.success('量表已保存')
+    scaleDialog.value = false
+  } catch (e: any) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    savingScales.value = false
+  }
+}
+
+async function removeScale(s: Scale) {
+  try {
+    await ElMessageBox.confirm(`删除量表「${s.name}」？已有测评记录的历史结果不受影响。`, '删除量表', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    scales.value = await put('/api/psy/scales', { scales: scales.value.filter((x) => x.id !== s.id) })
+    ElMessage.success('已删除')
+  } catch (e: any) {
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
+async function resetScales() {
+  try {
+    await ElMessageBox.confirm('将清除所有自定义量表与修改，恢复为内置的 PHQ-9 / GAD-7 / SAS / SDS，确定？', '恢复默认', { type: 'warning' })
+  } catch {
+    return
+  }
+  scales.value = await post('/api/psy/scales/reset', {})
+  ElMessage.success('已恢复内置默认量表')
 }
 
 // —— 跟进提醒 ——
@@ -231,8 +475,9 @@ function goAgent(p: any) {
             <template #header>使用指引</template>
             <ol class="guide">
               <li>在「心理档案」为需要关注的学生建档，标注关注等级。</li>
-              <li>定期用「心理测评」给学生做 PHQ-9 / GAD-7 / SAS / SDS 筛查，系统自动计分并给出结果解释。</li>
-              <li>每次谈话或辅导后记一条「辅导记录」，可设置下次跟进日期，到龄会在「跟进提醒」出现。</li>
+              <li>在「心理测评」选好学生与量表，平台内直接作答，系统自动计分并给出结果解释。</li>
+              <li>需要纸质量表时，到「量表管理」导出 DOCX 或直接打印空白问卷。</li>
+              <li>每次谈话或辅导后记一条「辅导记录」，可设置下次跟进日期，到期会在「跟进提醒」出现。</li>
               <li>拿不准怎么应对时，到「智能助手」打开心理模式提问，会结合校园心理健康知识库回答。</li>
               <li>量表得分出现预警标记（如 PHQ-9 第9题 ≥ 1 分）时，请马上进行安全谈话并联系监护人与专业人员。</li>
             </ol>
@@ -278,6 +523,84 @@ function goAgent(p: any) {
             </template>
           </el-table-column>
           <template #empty><span class="dim">还没有心理档案，点击右上角「新建档案」开始</span></template>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 心理测评 -->
+      <el-tab-pane label="心理测评" name="assess">
+        <div class="toolbar">
+          <span class="dim">测评学生：</span>
+          <el-select v-model="quizProfileId" placeholder="从心理档案中选择学生" filterable style="width: 260px">
+            <el-option v-for="p in profiles" :key="p.id" :value="p.id" :label="`${p.student_name}（${p.class_name || '未填班级'}）`" />
+          </el-select>
+          <span v-if="!profiles.length" class="dim">还没有心理档案，请先在「心理档案」页建档</span>
+        </div>
+
+        <div class="scale-grid">
+          <el-card v-for="s in scales" :key="s.id" shadow="hover" class="scale-card">
+            <div class="sc-head">
+              <b>{{ s.id }}</b>
+              <el-tag v-if="s.builtin" size="small" effect="plain">内置</el-tag>
+              <el-tag v-else size="small" type="success" effect="plain">自定义</el-tag>
+            </div>
+            <div class="sc-name">{{ s.name }}</div>
+            <div class="sc-hint">{{ s.hint }}</div>
+            <div class="sc-meta">
+              {{ s.items.length }} 题 · {{ s.options.length }} 个选项 · {{ s.score_mode === 'std125' ? '标准分' : '总分计分' }}
+              <el-tag v-if="s.flag_item > 0" type="danger" size="small" effect="plain" style="margin-left: 4px">含预警题</el-tag>
+            </div>
+            <div class="sc-actions">
+              <el-button type="primary" size="small" :disabled="!quizProfileId" @click="startQuizFor(s)">开始测评</el-button>
+              <el-button size="small" plain @click="exportScaleDocx(s)">导出问卷</el-button>
+              <el-button size="small" plain @click="printScale(s)">打印</el-button>
+            </div>
+          </el-card>
+        </div>
+        <el-empty v-if="!scales.length" description="暂无可用量表" :image-size="70" />
+      </el-tab-pane>
+
+      <!-- 量表管理 -->
+      <el-tab-pane label="量表管理" name="scales">
+        <div class="toolbar">
+          <span class="dim">维护量表题库与计分规则，所有量表即时在「心理测评」中生效</span>
+          <div class="spacer" />
+          <el-button @click="resetScales">恢复默认</el-button>
+          <el-button type="primary" @click="openScaleDialog()"><el-icon><Plus /></el-icon>新增量表</el-button>
+        </div>
+
+        <el-table :data="scales" stripe>
+          <el-table-column label="编号" width="100">
+            <template #default="{ row }">
+              <b>{{ row.id }}</b>
+              <el-tag v-if="row.builtin" size="small" effect="plain" style="margin-left: 4px">内置</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="name" label="名称" min-width="180" />
+          <el-table-column label="题数" width="70">
+            <template #default="{ row }">{{ row.items.length }}</template>
+          </el-table-column>
+          <el-table-column label="计分" width="110">
+            <template #default="{ row }">{{ row.score_mode === 'std125' ? '标准分×1.25' : '总分计分' }}</template>
+          </el-table-column>
+          <el-table-column label="分档" min-width="200">
+            <template #default="{ row }">
+              <span class="dim">{{ row.thresholds.map((t: ScaleThreshold) => `${t.min}+ ${t.level}`).join(' / ') }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="预警题" width="90">
+            <template #default="{ row }">
+              <el-tag v-if="row.flag_item > 0" type="danger" size="small">第 {{ row.flag_item }} 题</el-tag>
+              <span v-else class="dim">无</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="290" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" text type="primary" @click="openScaleDialog(row)">编辑</el-button>
+              <el-button size="small" text @click="exportScaleDocx(row)">导出问卷</el-button>
+              <el-button size="small" text @click="printScale(row)">打印</el-button>
+              <el-button v-if="!row.builtin" size="small" text type="danger" @click="removeScale(row)">删除</el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </el-tab-pane>
 
@@ -420,9 +743,9 @@ function goAgent(p: any) {
     <el-dialog v-model="quizDialog" width="680px" :title="quiz.profile ? `心理测评：${quiz.profile.student_name}` : '心理测评'" top="4vh">
       <div class="quiz-head">
         <span>选择量表：</span>
-        <el-radio-group :model-value="quiz.scale?.id ?? ''" @update:model-value="(v: any) => pickScale(v)">
-          <el-radio-button v-for="s in scales" :key="s.id" :value="s.id">{{ s.id }}</el-radio-button>
-        </el-radio-group>
+        <el-select :model-value="quiz.scale?.id ?? ''" placeholder="选择量表" style="width: 300px" @update:model-value="(v: any) => pickScale(v)">
+          <el-option v-for="s in scales" :key="s.id" :value="s.id" :label="`${s.id} · ${s.name}`" />
+        </el-select>
       </div>
 
       <template v-if="quiz.scale">
@@ -430,9 +753,12 @@ function goAgent(p: any) {
         <el-progress :percentage="Math.round((quizProgress / quiz.scale.items.length) * 100)" :stroke-width="6" class="quiz-progress" />
         <div class="quiz-scroll">
           <div v-for="(item, i) in quiz.scale.items" :key="i" class="quiz-item">
-            <div class="q-title">{{ i + 1 }}. {{ item }}</div>
+            <div class="q-title">
+              {{ i + 1 }}. {{ item }}
+              <el-tag v-if="quiz.scale.flag_item === i + 1" type="danger" size="small" effect="plain" style="margin-left: 6px">预警题</el-tag>
+            </div>
             <el-radio-group v-model="quiz.answers[i]">
-              <el-radio v-for="(opt, oi) in quiz.scale.options" :key="oi" :value="oi + quiz.scale.min" class="q-opt">{{ opt }}</el-radio>
+              <el-radio v-for="(opt, oi) in quiz.scale.options" :key="oi" :value="opt.score" class="q-opt">{{ opt.label }}</el-radio>
             </el-radio-group>
           </div>
         </div>
@@ -444,7 +770,8 @@ function goAgent(p: any) {
           测评结果：{{ quiz.result.score }} 分 · {{ quiz.result.level }}
           <template v-if="quiz.result.flagged"> · ⚠️ 出现预警题目，建议马上进行安全谈话并联系专业人员</template>
         </template>
-        结果已保存到该学生档案。量表结果仅为筛查参考，不能替代临床诊断。
+        <div>结果已保存到该学生档案。量表结果仅为筛查参考，不能替代临床诊断。</div>
+        <div v-if="resultNote" class="result-note">{{ resultNote }}</div>
       </el-alert>
 
       <template #footer>
@@ -452,6 +779,74 @@ function goAgent(p: any) {
         <el-button v-if="!quiz.result" type="primary" :disabled="!quiz.scale || quizProgress < (quiz.scale?.items.length ?? 0)" :loading="submittingQuiz" @click="submitQuiz">
           提交并计分（{{ quizProgress }}/{{ quiz.scale?.items.length ?? 0 }}）
         </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 量表编辑对话框 -->
+    <el-dialog v-model="scaleDialog" :title="scaleForm.editing ? `编辑量表：${scaleForm.id}` : '新增量表'" width="720px" top="4vh">
+      <el-form label-width="100px" label-position="left">
+        <el-form-item label="量表编号" required>
+          <el-input v-model="scaleForm.id" :disabled="scaleForm.editing" placeholder="如 SSRS-40（字母/数字/中划线/下划线）" maxlength="32" style="width: 300px" />
+        </el-form-item>
+        <el-form-item label="量表名称" required>
+          <el-input v-model="scaleForm.name" maxlength="100" placeholder="如 社会支持评定量表" style="width: 420px" />
+        </el-form-item>
+        <el-form-item label="指导语">
+          <el-input v-model="scaleForm.hint" type="textarea" :rows="2" maxlength="200" placeholder="作答前展示给学生的说明" />
+        </el-form-item>
+        <el-form-item label="题目（每行一题）" required>
+          <el-input v-model="scaleForm.itemsText" type="textarea" :rows="8" placeholder="每行一道题目" />
+          <div class="dim form-tip">当前 {{ scaleForm.itemsText.split('\n').filter((t) => t.trim()).length }} 题</div>
+        </el-form-item>
+        <el-form-item label="选项与分值" required>
+          <div class="opt-rows">
+            <div v-for="(o, i) in scaleForm.options" :key="i" class="opt-row">
+              <el-input v-model="o.label" placeholder="选项文字" style="width: 220px" maxlength="40" />
+              <el-input-number v-model="o.score" :min="0" :max="10" size="default" style="width: 110px" />
+              <el-button size="small" text type="danger" :disabled="scaleForm.options.length <= 2" @click="scaleForm.options.splice(i, 1)">删除</el-button>
+            </div>
+            <el-button size="small" :disabled="scaleForm.options.length >= 6" @click="scaleForm.options.push({ label: '', score: scaleForm.options.length })"><el-icon><Plus /></el-icon>添加选项</el-button>
+          </div>
+          <div class="dim form-tip">2-6 个选项，分值 0-10 且不能重复</div>
+        </el-form-item>
+        <el-form-item label="反向计分题">
+          <el-input v-model="scaleForm.reverseText" placeholder="题号，逗号分隔，如 3, 7, 12（留空表示无）" style="width: 360px" />
+        </el-form-item>
+        <el-form-item label="计分方式">
+          <el-radio-group v-model="scaleForm.score_mode">
+            <el-radio value="sum">总分计分（各项相加）</el-radio>
+            <el-radio value="std125">标准分（总分 × 1.25 取整，SAS/SDS 口径）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="结果分档" required>
+          <div class="opt-rows">
+            <div v-for="(t, i) in scaleForm.thresholds" :key="i" class="opt-row">
+              <el-input-number v-model="t.min" :min="0" :max="999" size="default" style="width: 110px" />
+              <span class="dim">分起 →</span>
+              <el-input v-model="t.level" placeholder="等级，如 轻度焦虑" style="width: 160px" maxlength="20" />
+              <el-input v-model="t.note" placeholder="结果解释与建议（可空）" style="width: 240px" maxlength="500" />
+              <el-button size="small" text type="danger" :disabled="scaleForm.thresholds.length <= 1" @click="scaleForm.thresholds.splice(i, 1)">删除</el-button>
+            </div>
+            <el-button size="small" :disabled="scaleForm.thresholds.length >= 10" @click="scaleForm.thresholds.unshift({ min: 0, level: '', note: '' })"><el-icon><Plus /></el-icon>添加分档</el-button>
+          </div>
+          <div class="dim form-tip">按「分起」从高到低生效，最后一档须从 0 分起（保存时自动排序）</div>
+        </el-form-item>
+        <el-form-item label="预警题">
+          <div class="flag-row">
+            <span>第</span>
+            <el-input-number v-model="scaleForm.flag_item" :min="0" :max="200" size="default" style="width: 100px" />
+            <span>题得分 ≥</span>
+            <el-input-number v-model="scaleForm.flag_min" :min="0" :max="10" size="default" style="width: 100px" />
+            <span>时标记预警（题号填 0 表示不启用）</span>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="scaleForm.flag_item > 0" label="预警说明">
+          <el-input v-model="scaleForm.flag_note" type="textarea" :rows="2" maxlength="200" placeholder="触发预警时给老师的处置说明，如：第 9 题涉及自伤念头…" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="scaleDialog = false">取消</el-button>
+        <el-button type="primary" :loading="savingScales" @click="saveScaleDialog">保存量表</el-button>
       </template>
     </el-dialog>
   </div>
@@ -552,6 +947,50 @@ function goAgent(p: any) {
   vertical-align: text-top;
 }
 
+.scale-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.scale-card {
+  border: 1px solid #eef0f6;
+  border-radius: 14px;
+}
+
+.sc-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sc-name {
+  font-weight: 600;
+  margin: 8px 0 4px;
+  color: #2f3646;
+}
+
+.sc-hint {
+  color: #7a839b;
+  font-size: 12.5px;
+  min-height: 36px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sc-meta {
+  color: #a0a8bd;
+  font-size: 12.5px;
+  margin: 8px 0 10px;
+}
+
+.sc-actions {
+  display: flex;
+  gap: 4px;
+}
+
 .detail {
   padding-bottom: 30px;
 }
@@ -643,5 +1082,35 @@ function goAgent(p: any) {
 
 .quiz-result {
   margin-top: 14px;
+}
+
+.result-note {
+  margin-top: 6px;
+  white-space: pre-line;
+}
+
+.opt-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.opt-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.flag-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: #5a6378;
+  font-size: 13px;
+}
+
+.form-tip {
+  margin-top: 4px;
+  line-height: 1.4;
 }
 </style>

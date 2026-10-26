@@ -129,6 +129,8 @@ func handleExportSave(w http.ResponseWriter, r *http.Request) {
 		mime = "text/csv; charset=utf-8"
 	case strings.HasSuffix(strings.ToLower(name), ".zip"):
 		mime = "application/zip"
+	case strings.HasSuffix(strings.ToLower(name), ".docx"):
+		mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	}
 	var idBytes [12]byte
 	rand.Read(idBytes[:])

@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -13,9 +14,59 @@ import (
 var riskLevels = map[string]bool{"常规关注": true, "重点关注": true, "高危预警": true}
 
 func registerPsyRoutes(mux *http.ServeMux) {
-	// —— 量表题库（前端渲染问卷用，计分在服务端做）——
+	// —— 量表题库：生效集合 = 用户覆盖版 或 内置默认（计分在服务端做）——
 	mux.HandleFunc("GET /api/psy/scales", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, scaleNames())
+		writeJSON(w, 200, resolveScales(ledgerDB(r)))
+	})
+
+	// 保存整套量表配置（含自定义量表）
+	mux.HandleFunc("PUT /api/psy/scales", func(w http.ResponseWriter, r *http.Request) {
+		d := ledgerDB(r)
+		raw, err := decodeBodyRaw(r)
+		if err != nil {
+			fail(w, 400, "请求格式错误")
+			return
+		}
+		var body struct {
+			Scales []psychoScale `json:"scales"`
+		}
+		if json.Unmarshal(raw, &body) != nil {
+			fail(w, 400, "请求格式错误")
+			return
+		}
+		list, err := validateScales(body.Scales)
+		if err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+		out, _ := json.Marshal(list)
+		setSetting(d, "psy_scales", string(out))
+		writeJSON(w, 200, list)
+	})
+
+	// 恢复内置默认（清除覆盖）
+	mux.HandleFunc("POST /api/psy/scales/reset", func(w http.ResponseWriter, r *http.Request) {
+		d := ledgerDB(r)
+		setSetting(d, "psy_scales", "")
+		writeJSON(w, 200, defaultScales)
+	})
+
+	// 问卷导出 DOCX（学生填写版，方便打印）
+	mux.HandleFunc("GET /api/psy/scales/{id}/export.docx", func(w http.ResponseWriter, r *http.Request) {
+		s := resolveScale(ledgerDB(r), r.PathValue("id"))
+		if s == nil {
+			fail(w, 404, "量表不存在")
+			return
+		}
+		buf, err := buildScaleDocx(s)
+		if err != nil {
+			fail(w, 500, "导出失败："+err.Error())
+			return
+		}
+		name := s.Name + ".docx"
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+		w.Header().Set("Content-Disposition", `attachment; filename="scale.docx"; filename*=UTF-8''`+url.PathEscape(name))
+		w.Write(buf)
 	})
 
 	// —— 档案 ——
@@ -226,7 +277,12 @@ func registerPsyRoutes(mux *http.ServeMux) {
 				answers = append(answers, toFloat(v))
 			}
 		}
-		score, level, flagged, err := scoreAssessment(scale, answers)
+		def := resolveScale(d, scale)
+		if def == nil {
+			fail(w, 400, "未知量表: "+scale)
+			return
+		}
+		score, level, flagged, err := scoreScale(def, answers)
 		if err != nil {
 			fail(w, 400, err.Error())
 			return

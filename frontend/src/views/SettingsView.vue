@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchClasses, fetchClassSubjects, saveClassSubjects, get, post, put, authDownload, getApiBase, type SubjectInfo } from '@/api'
+import { fetchClasses, fetchClassSubjects, saveClassSubjects, get, post, put, downloadFile, type SubjectInfo } from '@/api'
 import { auth } from '@/utils/auth'
 
-const teacher = ref('')
 const isAdmin = ref(auth.user?.role === 'admin')
 const term = ref('')
 const subjects = ref<SubjectInfo[]>([])
@@ -18,7 +17,6 @@ const PALETTE = ['#fef0f0', '#eef3ff', '#f4f0ff', '#effaf7', '#fef6ec', '#edf9ff
 
 onMounted(async () => {
   try {
-    teacher.value = (await get('/api/settings/teacher_name')).value
     term.value = (await get('/api/settings/term')).value
     classes.value = await fetchClasses()
     if (classes.value.length) {
@@ -36,9 +34,8 @@ async function loadSubjects() {
 }
 
 async function saveBasic() {
-  await put('/api/settings/teacher_name', { value: teacher.value })
   await put('/api/settings/term', { value: term.value })
-  ElMessage.success('基本信息已保存，刷新顶部栏后生效')
+  ElMessage.success('已保存，顶部栏即时生效')
 }
 
 function addSubject() {
@@ -54,26 +51,11 @@ async function saveSubjects() {
   ElMessage.success(`「${subjectClass.value}」课程设置已保存，课程表即时生效`)
 }
 
+// WebView2 内 blob 下载不可用，备份统一走 export/save 链（见 api/downloadFile）
 async function backup() {
   try {
-    const res = await authDownload('/api/backup')
-    const bytes = await res.arrayBuffer()
-    const name = `teacher-ledger-backup-${new Date().toISOString().slice(0, 10)}.zip`
-    // WebView2 内 blob <a download> 无法触发系统下载，走后端一次性下载链接
-    const token = localStorage.getItem('ledger_token') || ''
-    const save = await fetch(`${getApiBase()}/api/export/save?name=${encodeURIComponent(name)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${token}` },
-      body: bytes,
-    })
-    const data = await save.json().catch(() => null)
-    if (!save.ok || !data?.url) throw new Error(data?.message || '导出失败')
-    const a = document.createElement('a')
-    a.href = getApiBase() + data.url
-    a.download = name
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
+    await downloadFile('/api/backup', `teacher-ledger-backup-${new Date().toISOString().slice(0, 10)}.zip`)
+    ElMessage.success('备份开始下载')
   } catch (e: any) {
     ElMessage.error(e.message || '备份下载失败')
   }
@@ -112,10 +94,10 @@ async function resetAll() {
       <div class="card">
         <div class="card-title">基本信息</div>
         <el-form label-width="84px" style="max-width: 360px">
-          <el-form-item label="教师姓名"><el-input v-model="teacher" placeholder="显示在页面右上角" /></el-form-item>
           <el-form-item label="当前学期"><el-input v-model="term" placeholder="如：2025-2026 第一学期" /></el-form-item>
           <el-button type="primary" @click="saveBasic">保存</el-button>
         </el-form>
+        <div style="color: #aab1c5; font-size: 12.5px; margin-top: 10px">昵称与头像在右上角「个人中心」里修改</div>
       </div>
 
       <div class="card">
